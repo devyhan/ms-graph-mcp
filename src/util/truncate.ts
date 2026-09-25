@@ -43,12 +43,20 @@ function stringifySafe(value: unknown): string {
   }
 }
 
+/**
+ * Printed BEFORE the fragment, not after.
+ *
+ * A reader meeting the payload first will try to parse it, fail somewhere deep
+ * inside, and go looking for a malformed value that does not exist. Leading
+ * with the warning costs one line and removes that entirely.
+ */
 function truncationNotice(originalChars: number, keptChars: number): string {
   return (
-    `\n\n--- OUTPUT TRUNCATED ---\n` +
-    `Showing the first ${keptChars} of ${originalChars} characters; the JSON above is cut mid-structure and is not valid JSON. ` +
-    `Narrow the result and call again: pass $select to return fewer fields, a smaller $top, a $filter to reduce rows, ` +
-    `or request one specific item by id.`
+    `--- OUTPUT TRUNCATED: NOT VALID JSON ---\n` +
+    `What follows is the first ${keptChars} of ${originalChars} characters and stops mid-structure, ` +
+    `so parsing it will fail. It could not be shortened by dropping rows, which means one item is ` +
+    `itself over the limit. Read it as text, or call again for less: fewer fields, a smaller page, ` +
+    `a narrower filter, or one item by id.`
   );
 }
 
@@ -66,12 +74,75 @@ export function serializeResult(value: unknown, maxChars: number): SerializedRes
     return { text: full, truncated: false, originalChars };
   }
 
+  // Drop whole rows before resorting to cutting characters. A tool result is
+  // almost always an object with one array in it, and half a row helps nobody:
+  // the model parses the JSON, so a result that is still JSON — with fewer
+  // items and a field saying so — is worth far more than a prefix of one.
+  const trimmed = dropRowsToFit(value, limit);
+  if (trimmed !== null) {
+    const text = stringifySafe(trimmed);
+    if (text.length <= limit) {
+      return { text, truncated: true, originalChars };
+    }
+  }
+
+  // Nothing row-shaped to shed, or the rows are individually too big. Fall back
+  // to a character cut, which is not valid JSON — say so first rather than
+  // letting the reader discover it from a parse error at some byte offset.
   const kept = full.slice(0, limit);
   return {
-    text: kept + truncationNotice(originalChars, kept.length),
+    text: truncationNotice(originalChars, kept.length) + '\n' + kept,
     truncated: true,
     originalChars,
   };
+}
+
+/**
+ * Re-serialises `value` with its longest array shortened until the whole thing
+ * fits, returning null when there is no array to shorten.
+ *
+ * Binary search on the row count rather than dropping one at a time: a chat
+ * list can be hundreds of rows and each attempt re-serialises the object.
+ */
+function dropRowsToFit(value: unknown, limit: number): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+
+  const source = value as Record<string, unknown>;
+  let key: string | null = null;
+  let rows: unknown[] = [];
+  for (const [k, v] of Object.entries(source)) {
+    if (Array.isArray(v) && v.length > rows.length) {
+      key = k;
+      rows = v;
+    }
+  }
+  if (key === null || rows.length === 0) return null;
+
+  const build = (count: number): Record<string, unknown> => ({
+    ...source,
+    [key as string]: rows.slice(0, count),
+    truncated: {
+      reason: `The full result was over the ${limit}-character output limit.`,
+      field: key,
+      returned: count,
+      total: rows.length,
+      advice:
+        'These are the first rows only. Ask for fewer fields or a smaller page, ' +
+        'filter the query, or page through with the cursor if one is present.',
+    },
+  });
+
+  // The empty-list case still carries the note, so a caller always learns why.
+  if (stringifySafe(build(0)).length > limit) return null;
+
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (stringifySafe(build(mid)).length <= limit) low = mid;
+    else high = mid - 1;
+  }
+  return build(low);
 }
 
 /** Caps a free-text field (mail body, file preview) with a visible marker. */
