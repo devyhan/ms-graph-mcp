@@ -10,6 +10,9 @@
   "main": "dist/index.js",
   "files": [
     "dist",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.test.js.map",
     "README.md",
     "LICENSE"
   ],
