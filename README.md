@@ -147,14 +147,22 @@ is no MCP config to edit and nothing to export in a shell profile.
 /plugin install ms-graph-mcp@devyhan
 ```
 
-Claude Code then prompts for four values. Only the first has no sensible default:
+Claude Code prompts for four settings when the plugin is enabled, and fills in
+sensible values for three of them:
 
-| Setting | Leave blank to get |
-| --- | --- |
-| Application (client) ID | nothing — sign-in cannot start without it |
-| Directory (tenant) ID | `common`, which suits most work accounts |
-| Tool groups | the personal set: profile, mail, calendar, files, To Do, contacts, search |
-| Read-only mode | read-write; set `1` to remove every tool that writes |
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Application (client) ID | none, and required | The Entra application to sign in with. The dialog will not accept an empty value, because there is nothing to fall back on. |
+| Directory (tenant) ID | `common` | Suits most work and school accounts. Use `consumers` for a personal Microsoft account. |
+| Tool groups | the personal set | Profile, mail, calendar, files, To Do, contacts and search. A shorter list means a smaller consent prompt. |
+| Read-only | on | Hides every tool that writes and drops the write scopes from the consent request. Turn it off when you want the server to act, not just read. |
+
+Read-only defaults to on here, and to off on the command line. The plugin is the
+path someone takes without reading this file first, and an assistant that can send
+mail and delete files on a fresh install is the wrong first state; on the command
+line the choice is already explicit.
+
+You can change any of them later from `/config`.
 
 You still need your own Entra application — see
 [Register your own Entra application](#register-your-own-entra-application) — because

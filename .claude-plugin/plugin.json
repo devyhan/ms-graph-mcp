@@ -3,7 +3,7 @@
   "name": "ms-graph-mcp",
   "displayName": "Microsoft Graph MCP",
   "version": "0.1.0",
-  "description": "Read your own Microsoft 365 — Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do, Planner — from Claude Code, through Microsoft Graph with delegated permissions.",
+  "description": "Read your own Microsoft 365 \u2014 Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do, Planner \u2014 from Claude Code, through Microsoft Graph with delegated permissions.",
   "author": {
     "name": "devyhan",
     "url": "https://github.com/devyhan"
@@ -20,34 +20,39 @@
     "sharepoint",
     "mcp"
   ],
-
   "userConfig": {
     "client_id": {
       "type": "string",
       "title": "Application (client) ID",
-      "description": "The Entra application this server signs in with. Register one at https://entra.microsoft.com under App registrations, add the redirect URI http://localhost under 'Mobile and desktop applications', and set 'Allow public client flows' to Yes. There is no shared application to fall back on."
+      "required": true,
+      "description": "The Entra application this server signs in with. Register one at https://entra.microsoft.com under App registrations: add the redirect URI http://localhost under 'Mobile and desktop applications', and set 'Allow public client flows' to Yes. This project publishes no shared application, so there is nothing to fall back on."
     },
     "tenant_id": {
       "type": "string",
       "title": "Directory (tenant) ID",
-      "description": "Your organisation's tenant ID. Leave blank for 'common', which suits most work accounts; use 'consumers' for a personal Microsoft account."
+      "default": "common",
+      "description": "Your organisation's tenant ID. 'common' suits most work and school accounts; use 'consumers' for a personal Microsoft account, whose refresh tokens are rejected through 'common'."
     },
     "groups": {
       "type": "string",
       "title": "Tool groups",
-      "description": "Comma-separated product areas to enable: me, mail, calendar, files, todo, planner, contacts, chat, sharepoint, search, teams, directory, intune. Leave blank for the personal set. The scopes requested at sign-in are derived from this, so a narrower list means a narrower consent prompt."
+      "default": "me,mail,calendar,files,todo,contacts,search",
+      "description": "Comma-separated product areas: me, mail, calendar, files, todo, planner, contacts, chat, sharepoint, search, teams, directory, intune. The scopes requested at sign-in are derived from this, so a shorter list means a smaller consent prompt. The last three need tenant administrator consent."
     },
     "read_only": {
-      "type": "string",
-      "title": "Read-only mode",
-      "description": "Set to 1 to remove every tool that writes — no sending mail, no deleting files — and to drop the write scopes from the consent request. Recommended until you need otherwise."
+      "type": "boolean",
+      "title": "Read-only",
+      "default": true,
+      "description": "Hide every tool that writes \u2014 no sending mail, no deleting files \u2014 and drop the write scopes from the consent request. Turn this off when you want the server to act, not just read."
     }
   },
-
   "mcpServers": {
     "microsoft-graph": {
       "command": "npx",
-      "args": ["-y", "@devyhan/ms-graph-mcp"],
+      "args": [
+        "-y",
+        "@devyhan/ms-graph-mcp"
+      ],
       "env": {
         "MS365_MCP_CLIENT_ID": "${user_config.client_id}",
         "MS365_MCP_TENANT_ID": "${user_config.tenant_id}",
