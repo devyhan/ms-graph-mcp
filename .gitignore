@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local token cache, if ever pointed at the project directory by --cache-dir.
+# The real default lives in the user config directory, never here.
+*.enc
+cache.key
+.env
+.env.local
+
+.DS_Store
+
+# Korean-language design memos and research written during an internal
+# engagement. Excluded from the public repository by the owner's decision:
+# they carry no identifiers, but they read as internal decision records and
+# would let a reader infer the context this was built in.
+docs/
+
+# Contract-check artifacts: fetched Microsoft metadata, never committed.
+.graph-cache/
+*.tgz

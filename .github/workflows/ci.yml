@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor declared in package.json engines; 22 and 24 are the
+        # active LTS lines. Windows is not decoration here: the token cache
+        # resolves %APPDATA%, and the test script's glob behaviour differs from
+        # sh, which is how a previous version silently skipped a whole file.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [20, 22, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `pretest` builds, so this covers compilation too. The suite stubs every
+      # network call, so it must pass with no credentials and no Microsoft
+      # tenant — if it ever needs either, that is the bug.
+      - name: Test
+        run: npm test
+
+      - name: Assert the full suite ran
+        shell: bash
+        run: |
+          count=$(node --test dist/ 2>&1 | grep -E '^# tests' | grep -oE '[0-9]+')
+          echo "tests discovered: $count"
+          if [ "${count:-0}" -lt 90 ]; then
+            echo "::error::Only $count tests were discovered; the suite should be 90+."
+            echo "A shell that does not expand the test glob silently skips files."
+            exit 1
+          fi
+
+  package:
+    name: Package installs and runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # dist/ is gitignored, so this proves `prepack` rebuilds it. Without that
+      # script a publish from a clean checkout ships a tarball with no code and
+      # npm reports success.
+      - name: Pack from a clean checkout
+        run: |
+          npm pack --silent | tail -1 > /tmp/tgz
+          echo "tarball: $(cat /tmp/tgz)"
+          tar -tzf "$(cat /tmp/tgz)" | wc -l | xargs -I{} echo "files in tarball: {}"
+          if [ "$(tar -tzf "$(cat /tmp/tgz)" | wc -l)" -lt 50 ]; then
+            echo "::error::Tarball is nearly empty — prepack did not build."
+            exit 1
+          fi
+          tar -tzf "$(cat /tmp/tgz)" | grep -q 'package/LICENSE' || {
+            echo "::error::LICENSE is missing from the tarball."; exit 1; }
+
+      - name: Install the tarball and run it
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install --silent "$GITHUB_WORKSPACE/$(cat /tmp/tgz)"
+          npx ms-graph-mcp --version
+          npx ms-graph-mcp --help | head -1
+
+      # The server speaks MCP before anyone signs in: a client must be able to
+      # list tools without credentials. This also guards stdout purity, where a
+      # stray log line corrupts the JSON-RPC stream.
+      - name: Drive it over stdio the way a client would
+        run: |
+          cd /tmp/consumer
+          META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+          printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{$META}}" \
+            | npx ms-graph-mcp 2>/dev/null \
+            | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const lines=s.trim().split("\n");
+                let stray=0,tools=0;
+                for(const l of lines){try{const j=JSON.parse(l);
+                  if(j.jsonrpc!=="2.0")stray++;
+                  if(j.id===1)tools=j.result.tools.length;}catch{stray++}}
+                console.log("tools:",tools,"stray stdout lines:",stray);
+                if(stray>0){console.error("::error::stdout carried non-JSON-RPC output");process.exit(1)}
+                if(tools<40){console.error("::error::expected 40+ tools, got "+tools);process.exit(1)}
+              });'

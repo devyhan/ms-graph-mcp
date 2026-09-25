@@ -1,0 +1,128 @@
+name: Graph contract
+
+# Tracks the Microsoft Graph surface this server depends on. The regular test
+# suite stubs every network call, so it cannot notice Microsoft renaming an
+# endpoint, retiring a permission, or reclassifying one as admin-consent-only.
+# This job asks Microsoft directly and reports the difference.
+#
+# Deliberately separate from CI: it depends on two services we do not control,
+# so a Microsoft or GitHub outage must never fail a contributor's pull request.
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. Weekly is the right cadence: Graph moves on a monthly
+    # docs cycle, and a daily run would mostly re-report the same drift.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  push:
+    # Re-check when the thing being checked changes: a new scope or a new
+    # endpoint should be validated at the moment it is added, not next Monday.
+    paths:
+      - 'src/tools/**'
+      - 'scripts/graph-contract.mjs'
+      - '.github/workflows/graph-contract.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: graph-contract
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Check the Graph contract
+        id: contract
+        run: |
+          set +e
+          node scripts/graph-contract.mjs --no-cache --json > report.json
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          node -e '
+            const r = require("./report.json");
+            console.log(`scopes ${r.scopes}, tools ${r.tools}, errors ${r.errors}, warnings ${r.warnings}`);
+            for (const f of r.findings) console.log(`[${f.severity}] ${f.check}: ${f.subject}\n  ${f.detail}`);
+          ' | tee summary.txt
+          {
+            echo "## Graph contract"
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graph-contract-report
+          path: report.json
+          retention-days: 90
+
+      # Exit 2 means the check could not run (a fetch failed). That is not a
+      # Graph change, so it must not open an issue claiming one.
+      - name: Fail the job when the check itself broke
+        if: steps.contract.outputs.exit == '2'
+        run: |
+          echo "::error::The contract check could not complete — a source was unreachable."
+          exit 1
+
+      - name: Open or update a drift issue
+        if: steps.contract.outputs.exit == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('report.json', 'utf8'));
+            const title = 'Microsoft Graph contract drift detected';
+            const body = [
+              `The scheduled contract check found **${report.errors} error(s)** and ` +
+              `${report.warnings} warning(s) against the live Microsoft Graph metadata ` +
+              'and permissions reference.',
+              '',
+              `Checked at ${report.checkedAt} — ${report.scopes} scopes, ${report.tools} tools.`,
+              '',
+              '| Severity | Check | Subject | Detail |',
+              '| --- | --- | --- | --- |',
+              ...report.findings.map(f =>
+                `| ${f.severity} | ${f.check} | \`${f.subject}\` | ${f.detail.replace(/\|/g, '\\|')} |`),
+              '',
+              `[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              '',
+              '<sub>Opened automatically by the Graph contract workflow. ' +
+              'A `scope-admin-consent` or `scope-delegated` error changes what users can ' +
+              'consent to and should be treated as breaking.</sub>',
+            ].join('\n');
+
+            // One rolling issue rather than a new one each week: the drift is
+            // usually the same finding until someone acts on it.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'graph-drift',
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.data[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['graph-drift'],
+              });
+            }
+
+      - name: Fail the job so the schedule shows red
+        if: steps.contract.outputs.exit == '1'
+        run: exit 1
