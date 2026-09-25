@@ -137,6 +137,53 @@ npx @devyhan/ms-graph-mcp status
 
 `status` prints the application ID in use and where it came from, the account it resolved, and the scopes this configuration will request. Then point an MCP client at the server.
 
+### As a Claude Code plugin
+
+The plugin wires the server into Claude Code for you, so there is no MCP config to
+edit. It reads its settings from your environment, which is the only mechanism a
+plugin has for per-user values — the manifest is shared by everyone who installs it,
+so a client ID cannot live there.
+
+```
+/plugin marketplace add devyhan/ms-graph-mcp
+/plugin install ms-graph-mcp@devyhan
+```
+
+Then set your own application in your shell profile, before starting Claude Code:
+
+```sh
+# ~/.zshrc, ~/.bashrc, or wherever your shell reads on login
+export MS365_MCP_CLIENT_ID="<your application (client) ID>"
+export MS365_MCP_TENANT_ID="<your tenant ID>"   # omit for personal accounts
+export MS365_MCP_GROUPS="mail,calendar,files"   # omit for the default set
+export MS365_MCP_READ_ONLY=1                    # recommended to start
+```
+
+Claude Code inherits the environment of the shell it was launched from, so open a
+new terminal — or `source` your profile — after editing it. `/mcp` then shows the
+server, and `npx @devyhan/ms-graph-mcp status` prints which application it resolved
+and where it came from.
+
+Every variable is optional except `MS365_MCP_CLIENT_ID`. Leave one unset and the
+server falls back to its own default: `common` for the tenant, the `personal` preset
+for the groups, read-write for the mode. An unset variable is treated as absent
+rather than as an empty value, so a half-configured profile does not produce a
+half-configured server.
+
+Sign-in is still a terminal step, once:
+
+```
+npx @devyhan/ms-graph-mcp login
+```
+
+The server will not open a browser from inside a Claude Code session. The MCP
+transport owns stdout, and a sign-in prompt in the middle of a tool call would
+corrupt the JSON-RPC stream — so it returns an error telling you to run `login`
+instead. See [How sign-in works](#how-sign-in-works).
+
+Every flag in [Commands and flags](#commands-and-flags) has an `MS365_MCP_*`
+equivalent, so anything you can pass on the command line you can set here.
+
 ### Claude Code
 
 ```

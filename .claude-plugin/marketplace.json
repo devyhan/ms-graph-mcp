@@ -1,0 +1,15 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "devyhan",
+  "owner": {
+    "name": "devyhan",
+    "url": "https://github.com/devyhan"
+  },
+  "plugins": [
+    {
+      "name": "ms-graph-mcp",
+      "source": "./",
+      "description": "Read your own Microsoft 365 from Claude Code: Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do and Planner, through Microsoft Graph with delegated permissions."
+    }
+  ]
+}

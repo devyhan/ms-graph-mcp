@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "microsoft-graph": {
+      "command": "npx",
+      "args": ["-y", "@devyhan/ms-graph-mcp"],
+      "env": {
+        "MS365_MCP_CLIENT_ID": "${MS365_MCP_CLIENT_ID}",
+        "MS365_MCP_TENANT_ID": "${MS365_MCP_TENANT_ID}",
+        "MS365_MCP_GROUPS": "${MS365_MCP_GROUPS}",
+        "MS365_MCP_READ_ONLY": "${MS365_MCP_READ_ONLY}"
+      }
+    }
+  }
+}
