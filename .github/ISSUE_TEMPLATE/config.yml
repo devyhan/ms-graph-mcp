@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/devyhan/ms-graph-mcp/security/advisories/new
+    about: Report privately. Never post a token, a cache file, or real mail or chat content in a public issue.
+  - name: Sign-in or consent problem
+    url: https://github.com/devyhan/ms-graph-mcp#sign-in-errors
+    about: AADSTS errors and what fixes each one. Most sign-in failures are an app registration or a tenant consent policy, not a bug.

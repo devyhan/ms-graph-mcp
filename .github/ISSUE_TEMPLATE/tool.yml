@@ -1,0 +1,33 @@
+name: Tool request
+description: A Microsoft 365 operation this server does not cover yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want to do
+      description: Describe it as you would ask an assistant, not as an API call.
+    validations:
+      required: true
+
+  - type: input
+    id: endpoint
+    attributes:
+      label: Graph endpoint, if you know it
+      placeholder: "GET /me/messages/{id}/attachments"
+
+  - type: input
+    id: scope
+    attributes:
+      label: Delegated permission it needs
+      description: >
+        From the [Graph permissions reference](https://learn.microsoft.com/graph/permissions-reference).
+        A new scope widens the consent prompt for everyone, so it matters.
+      placeholder: "Mail.Read"
+
+  - type: checkboxes
+    id: writes
+    attributes:
+      label: Does it change anything?
+      options:
+        - label: This would create, modify, send or delete something

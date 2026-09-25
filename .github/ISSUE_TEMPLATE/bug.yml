@@ -1,0 +1,60 @@
+name: Bug report
+description: Something behaves differently from what the README says
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you paste anything:** never include an access or refresh token,
+        a `token-cache.enc` or `cache.key` file, or real mail, chat or file
+        content. Redact your client ID and tenant ID. If this looks like a
+        security problem, report it privately instead — see [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got.
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `status`
+      description: >
+        Run `npx @devyhan/ms-graph-mcp status` and paste it with the client ID
+        and tenant ID redacted. It reports which application was resolved, where
+        it came from, the enabled groups and the scopes that would be requested —
+        which is usually where the answer is.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`npx @devyhan/ms-graph-mcp --version`, and your Node version."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options:
+        - Claude Code plugin
+        - npx / npm, configured by hand
+        - Cloned from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: account
+    attributes:
+      label: Account type
+      options:
+        - Work or school account
+        - Personal Microsoft account
+        - Not sure
+    validations:
+      required: true
