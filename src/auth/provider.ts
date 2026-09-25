@@ -156,7 +156,7 @@ function redirectUriFor(authPort: number): string {
 function signInRequiredMessage(scopes: string[], detail?: string): string {
   const parts = [
     'No usable Microsoft 365 session.',
-    'Run the server\'s `login` command in a terminal (for example `npx @devyhan/ms-graph-mcp login`), complete the sign-in, then retry.',
+    'Run the server\'s `login` command in a terminal (for example `npx ms-graph-mcp login`), complete the sign-in, then retry.',
     `Scopes requested: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}.`,
   ];
   if (detail) parts.push(`Underlying error: ${detail}`);

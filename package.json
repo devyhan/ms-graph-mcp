@@ -1,5 +1,5 @@
 {
-  "name": "@devyhan/ms-graph-mcp",
+  "name": "ms-graph-mcp",
   "version": "0.1.0",
   "description": "MCP server connecting Microsoft 365 (Outlook, Teams, OneDrive, SharePoint, To Do, Planner, Entra ID, Intune) to AI assistants via Microsoft Graph",
   "license": "MIT",

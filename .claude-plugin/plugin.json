@@ -51,7 +51,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@devyhan/ms-graph-mcp"
+        "ms-graph-mcp"
       ],
       "env": {
         "MS365_MCP_CLIENT_ID": "${user_config.client_id}",

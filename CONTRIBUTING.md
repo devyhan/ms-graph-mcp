@@ -84,7 +84,7 @@ specific messages are fine and preferred over short vague ones.
 ## Reporting a bug
 
 Include what you ran, what you expected, what happened, and the output of
-`npx @devyhan/ms-graph-mcp status` **with the client ID and tenant ID redacted**.
+`npx ms-graph-mcp status` **with the client ID and tenant ID redacted**.
 
 Never paste a token, a `token-cache.enc`, a `cache.key`, or real mail or chat
 content into an issue. For anything that looks like a security problem, see

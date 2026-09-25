@@ -307,7 +307,7 @@ function runServe(parsed: ParsedConfig): void {
         '  microsoft-graph-mcp: NO ENTRA CLIENT ID CONFIGURED.\n' +
         '  The server will start and list its tools, but every Graph call will\n' +
         '  fail. Pass --client-id <id> or set MS365_MCP_CLIENT_ID, then run\n' +
-        '  `npx @devyhan/ms-graph-mcp login`.\n' +
+        '  `npx ms-graph-mcp login`.\n' +
         '**********************************************************************\n\n',
     );
     if (parsed.clientIdReason !== undefined) err(`${parsed.clientIdReason}\n\n`);

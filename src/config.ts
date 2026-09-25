@@ -244,7 +244,7 @@ export function describeClientIdSource(source: ClientIdSource): string {
  * barrier, and the user still deserves to know whose app is doing the asking.
  */
 export const SHIPPED_APP_DISCLOSURE = [
-  'This sign-in uses the application shipped with @devyhan/ms-graph-mcp, not one',
+  'This sign-in uses the application shipped with ms-graph-mcp, not one',
   'you registered. Consenting grants that application the delegated scopes',
   'listed above against your own mailbox, files and calendar.',
   '',

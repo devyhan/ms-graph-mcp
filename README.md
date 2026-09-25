@@ -1,4 +1,4 @@
-# @devyhan/ms-graph-mcp
+# ms-graph-mcp
 
 A Model Context Protocol server that gives an AI assistant access to your own Microsoft 365 data — Outlook mail and calendar, OneDrive, SharePoint, To Do, Planner, Teams chat, Entra ID and Intune — through the Microsoft Graph API. It runs locally over stdio, signs in as you with delegated permissions, and stores its token cache encrypted on your machine.
 
@@ -106,7 +106,7 @@ the top that lets a model use it safely.
 You need Node.js 20 or later. Sign in once, in a terminal:
 
 ```
-npx @devyhan/ms-graph-mcp login
+npx ms-graph-mcp login
 ```
 
 There is no application to register first: the server signs in with a shared multi-tenant Entra application published by this project. See [Which application am I signing in to](#which-application-am-i-signing-in-to) for what that means for you and for your tenant.
@@ -114,7 +114,7 @@ There is no application to register first: the server signs in with a shared mul
 **The shared registration is not published yet.** The constant it will occupy, `SHIPPED_CLIENT_ID` in `src/config.ts`, is still empty, so this build has no default application to fall back on. `login` says so and stops before it contacts Entra, and `status` prints the same registration walkthrough. Until the real ID ships, register an application of your own — or use one your organisation already has — and name it on each command:
 
 ```
-npx @devyhan/ms-graph-mcp login --client-id <your-client-id>
+npx ms-graph-mcp login --client-id <your-client-id>
 ```
 
 [Register your own Entra application](#register-your-own-entra-application) has the steps. When the shared ID lands, nothing else in this README changes: `--client-id` keeps working and keeps taking precedence over the shipped default.
@@ -124,7 +124,7 @@ Either way, your system browser opens on the Microsoft sign-in page. Pick the ac
 On a machine with no browser to open — an SSH session, a container, a headless server — ask for the device code flow instead:
 
 ```
-npx @devyhan/ms-graph-mcp login --auth-flow device
+npx ms-graph-mcp login --auth-flow device
 ```
 
 That prints a short code and a URL to open on any other device. Enter the code there and the terminal finishes on its own. The default, `--auth-flow auto`, already falls back to this when the browser cannot be opened; passing `device` explicitly skips the attempt that would fail. Both are OAuth 2.0 sign-ins and both end with the same delegated token — see [How sign-in works](#how-sign-in-works).
@@ -132,7 +132,7 @@ That prints a short code and a URL to open on any other device. Enter the code t
 Either way, check it worked:
 
 ```
-npx @devyhan/ms-graph-mcp status
+npx ms-graph-mcp status
 ```
 
 `status` prints the application ID in use and where it came from, the account it resolved, and the scopes this configuration will request. Then point an MCP client at the server.
@@ -172,7 +172,7 @@ first prompt.
 Sign-in remains a terminal step, once:
 
 ```
-npx @devyhan/ms-graph-mcp login
+npx ms-graph-mcp login
 ```
 
 The server will not open a browser from inside a Claude Code session. The MCP
@@ -184,7 +184,7 @@ Everything works before you configure anything: the server starts, lists its too
 and `status` explains what is missing. An installed-but-unconfigured plugin shows a
 working server rather than a broken one.
 
-**If a setting does not take effect**, run `npx @devyhan/ms-graph-mcp status` and read
+**If a setting does not take effect**, run `npx ms-graph-mcp status` and read
 the `Client ID from:` line — it names which source won. Should a value arrive as the
 literal text `${user_config.client_id}`, the placeholder was never substituted;
 the server refuses it and says so rather than passing it to Entra, where it would
@@ -210,7 +210,7 @@ plugin's prompts exist to avoid; if you are configuring by hand, prefer the flag
 ### Claude Code
 
 ```
-claude mcp add microsoft-graph -- npx -y @devyhan/ms-graph-mcp --preset work
+claude mcp add microsoft-graph -- npx -y ms-graph-mcp --preset work
 ```
 
 Or add it to `.mcp.json` in the project root:
@@ -220,7 +220,7 @@ Or add it to `.mcp.json` in the project root:
   "mcpServers": {
     "microsoft-graph": {
       "command": "npx",
-      "args": ["-y", "@devyhan/ms-graph-mcp", "--preset", "work"]
+      "args": ["-y", "ms-graph-mcp", "--preset", "work"]
     }
   }
 }
@@ -235,7 +235,7 @@ Edit `claude_desktop_config.json` (Settings > Developer > Edit Config):
   "mcpServers": {
     "microsoft-graph": {
       "command": "npx",
-      "args": ["-y", "@devyhan/ms-graph-mcp", "--preset", "work"]
+      "args": ["-y", "ms-graph-mcp", "--preset", "work"]
     }
   }
 }
@@ -251,7 +251,7 @@ Add `.vscode/mcp.json` to the workspace:
     "microsoft-graph": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@devyhan/ms-graph-mcp", "--preset", "work"]
+      "args": ["-y", "ms-graph-mcp", "--preset", "work"]
     }
   }
 }
@@ -295,11 +295,11 @@ The server starts whether or not an application is configured. With none it writ
 **Ask for less, then widen.** The scopes requested at sign-in are derived from the enabled groups, so start narrow and add:
 
 ```
-npx @devyhan/ms-graph-mcp login --groups me,mail
-npx @devyhan/ms-graph-mcp login --groups me,mail,calendar,files
+npx ms-graph-mcp login --groups me,mail
+npx ms-graph-mcp login --groups me,mail,calendar,files
 ```
 
-Entra prompts again only for what you added; what was already granted stays granted. `--read-only` drops every write scope from the request. `npx @devyhan/ms-graph-mcp permissions --preset work` prints the exact scope list for a configuration, formatted for pasting into an admin consent request.
+Entra prompts again only for what you added; what was already granted stays granted. `--read-only` drops every write scope from the request. `npx ms-graph-mcp permissions --preset work` prints the exact scope list for a configuration, formatted for pasting into an admin consent request.
 
 ## Register your own Entra application
 
@@ -717,7 +717,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 | macOS, Linux | `$XDG_CONFIG_HOME/microsoft-graph-mcp`, or `~/.config/microsoft-graph-mcp` |
 | Windows | `%APPDATA%\microsoft-graph-mcp` |
 
-Override with `--cache-dir`. Run `npx @devyhan/ms-graph-mcp status` to see the resolved path, and `logout` to delete both files. Keeping the key next to the ciphertext protects against a stray backup or a file synced to the cloud, not against an attacker who already has read access to your home directory.
+Override with `--cache-dir`. Run `npx ms-graph-mcp status` to see the resolved path, and `logout` to delete both files. Keeping the key next to the ciphertext protects against a stray backup or a file synced to the cloud, not against an attacker who already has read access to your home directory.
 
 **No secrets in configuration.** The server is a public client and takes no client secret. The only credential it holds is the refresh token in the cache described above.
 

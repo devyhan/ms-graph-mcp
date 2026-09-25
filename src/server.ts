@@ -120,7 +120,7 @@ function describeGraphError(error: GraphError): string {
 function signInMessage(error: InteractionRequiredError): string {
   return [
     'Not signed in to Microsoft 365, or the stored session can no longer be refreshed.',
-    'The user must run `npx @devyhan/ms-graph-mcp login` in a terminal, complete the sign-in, ' +
+    'The user must run `npx ms-graph-mcp login` in a terminal, complete the sign-in, ' +
       'and then retry this call. This server cannot prompt for credentials itself, because ' +
       'the MCP transport owns stdio.',
     `Detail: ${error.message}`,

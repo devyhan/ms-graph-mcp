@@ -23,7 +23,7 @@ body:
     attributes:
       label: Output of `status`
       description: >
-        Run `npx @devyhan/ms-graph-mcp status` and paste it with the client ID
+        Run `npx ms-graph-mcp status` and paste it with the client ID
         and tenant ID redacted. It reports which application was resolved, where
         it came from, the enabled groups and the scopes that would be requested —
         which is usually where the answer is.
@@ -33,7 +33,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: "`npx @devyhan/ms-graph-mcp --version`, and your Node version."
+      description: "`npx ms-graph-mcp --version`, and your Node version."
     validations:
       required: true
 

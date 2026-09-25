@@ -85,6 +85,6 @@ jobs:
       - name: Where to check the attestation
         run: |
           echo "Published. Provenance should appear at:" >> "$GITHUB_STEP_SUMMARY"
-          echo "https://www.npmjs.com/package/@devyhan/ms-graph-mcp" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/ms-graph-mcp" >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Verify independently with `npm audit signatures` against a fresh install.' >> "$GITHUB_STEP_SUMMARY"
