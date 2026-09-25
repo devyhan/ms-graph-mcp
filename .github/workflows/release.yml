@@ -1,0 +1,90 @@
+name: Release
+
+# Publishes to npm with trusted publishing: GitHub mints a short-lived OIDC
+# token, npm exchanges it, and no long-lived credential is ever stored in this
+# repository. There is no NPM_TOKEN secret to leak, rotate, or forget.
+#
+# Provenance is automatic under OIDC — npm attaches a signed attestation naming
+# the commit, the workflow and the runner — so `--provenance` is deliberately
+# NOT passed. Passing it would force provenance rather than let npm decide,
+# which turns a silent skip into a hard failure if this repo ever goes private.
+#
+# Publishing requires a one-time setup on npmjs.com that is not in this file:
+#   Package > Settings > Trusted publishing > GitHub Actions
+#     Organization or user  devyhan
+#     Repository            ms-graph-mcp
+#     Workflow filename     release.yml      (bare filename, not the path)
+#     Environment name      (leave empty)
+#     Allowed actions       tick `npm publish`
+# That last box matters: configurations created after 2026-09-03 default to
+# `npm stage publish` only, which parks every release awaiting a manual 2FA
+# approval rather than completing here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    # Must be GitHub-hosted. A self-hosted runner cannot mint the OIDC token
+    # trusted publishing depends on.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # No registry-url and no NODE_AUTH_TOKEN: authentication is the OIDC
+          # exchange, not a token written into .npmrc.
+
+      - name: Assert npm is new enough for OIDC
+        run: |
+          node -v && npm -v
+          req=11.5.1; have="$(npm -v)"
+          if [ "$(printf '%s\n%s\n' "$req" "$have" | sort -V | head -n1)" != "$req" ]; then
+            echo "::error::npm $have is below $req — trusted publishing fails with a misleading E404 on older npm"
+            exit 1
+          fi
+
+      - run: npm ci
+
+      # The tag must match the version being published, or the release is a lie
+      # about which commit it came from — and provenance will attest to that lie.
+      - name: Check the tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p 'require("./package.json").version')"
+          echo "tag=$tag package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      # Bare, on purpose. prepublishOnly already runs typecheck and the full
+      # 99-test suite, and prepack rebuilds dist/ from a clean tree, so a
+      # separate test step here would only run everything twice. access and
+      # provenance both come from publishConfig.
+      - run: npm publish
+
+      - name: Where to check the attestation
+        run: |
+          echo "Published. Provenance should appear at:" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://www.npmjs.com/package/@devyhan/ms-graph-mcp" >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Verify independently with `npm audit signatures` against a fresh install.' >> "$GITHUB_STEP_SUMMARY"
