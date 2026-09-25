@@ -139,38 +139,29 @@ npx @devyhan/ms-graph-mcp status
 
 ### As a Claude Code plugin
 
-The plugin wires the server into Claude Code for you, so there is no MCP config to
-edit. It reads its settings from your environment, which is the only mechanism a
-plugin has for per-user values — the manifest is shared by everyone who installs it,
-so a client ID cannot live there.
+The plugin wires the server into Claude Code and asks you for its settings, so there
+is no MCP config to edit and nothing to export in a shell profile.
 
 ```
 /plugin marketplace add devyhan/ms-graph-mcp
 /plugin install ms-graph-mcp@devyhan
 ```
 
-Then set your own application in your shell profile, before starting Claude Code:
+Claude Code then prompts for four values. Only the first has no sensible default:
 
-```sh
-# ~/.zshrc, ~/.bashrc, or wherever your shell reads on login
-export MS365_MCP_CLIENT_ID="<your application (client) ID>"
-export MS365_MCP_TENANT_ID="<your tenant ID>"   # omit for personal accounts
-export MS365_MCP_GROUPS="mail,calendar,files"   # omit for the default set
-export MS365_MCP_READ_ONLY=1                    # recommended to start
-```
+| Setting | Leave blank to get |
+| --- | --- |
+| Application (client) ID | nothing — sign-in cannot start without it |
+| Directory (tenant) ID | `common`, which suits most work accounts |
+| Tool groups | the personal set: profile, mail, calendar, files, To Do, contacts, search |
+| Read-only mode | read-write; set `1` to remove every tool that writes |
 
-Claude Code inherits the environment of the shell it was launched from, so open a
-new terminal — or `source` your profile — after editing it. `/mcp` then shows the
-server, and `npx @devyhan/ms-graph-mcp status` prints which application it resolved
-and where it came from.
+You still need your own Entra application — see
+[Register your own Entra application](#register-your-own-entra-application) — because
+this project publishes no shared one. Paste its **Application (client) ID** into the
+first prompt.
 
-Every variable is optional except `MS365_MCP_CLIENT_ID`. Leave one unset and the
-server falls back to its own default: `common` for the tenant, the `personal` preset
-for the groups, read-write for the mode. An unset variable is treated as absent
-rather than as an empty value, so a half-configured profile does not produce a
-half-configured server.
-
-Sign-in is still a terminal step, once:
+Sign-in remains a terminal step, once:
 
 ```
 npx @devyhan/ms-graph-mcp login
@@ -178,11 +169,35 @@ npx @devyhan/ms-graph-mcp login
 
 The server will not open a browser from inside a Claude Code session. The MCP
 transport owns stdout, and a sign-in prompt in the middle of a tool call would
-corrupt the JSON-RPC stream — so it returns an error telling you to run `login`
+corrupt the JSON-RPC stream, so it returns an error telling you to run `login`
 instead. See [How sign-in works](#how-sign-in-works).
 
-Every flag in [Commands and flags](#commands-and-flags) has an `MS365_MCP_*`
-equivalent, so anything you can pass on the command line you can set here.
+Everything works before you configure anything: the server starts, lists its tools,
+and `status` explains what is missing. An installed-but-unconfigured plugin shows a
+working server rather than a broken one.
+
+**If a setting does not take effect**, run `npx @devyhan/ms-graph-mcp status` and read
+the `Client ID from:` line — it names which source won. Should a value arrive as the
+literal text `${user_config.client_id}`, the placeholder was never substituted;
+the server refuses it and says so rather than passing it to Entra, where it would
+fail much later and blame something else.
+
+### Without the plugin
+
+Every setting is also an `MS365_MCP_*` environment variable, which is what the plugin
+sets under the hood, and every one has a command-line flag — see
+[Commands and flags](#commands-and-flags). Use these when you run the server directly:
+
+```sh
+export MS365_MCP_CLIENT_ID="<your application (client) ID>"
+export MS365_MCP_TENANT_ID="<your tenant ID>"
+export MS365_MCP_GROUPS="mail,calendar,files"
+export MS365_MCP_READ_ONLY=1
+```
+
+A client launched from a desktop icon rather than a terminal does not read your shell
+profile, so a variable exported there will not reach it. That is the failure the
+plugin's prompts exist to avoid; if you are configuring by hand, prefer the flags.
 
 ### Claude Code
 

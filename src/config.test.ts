@@ -17,7 +17,9 @@ import {
   graphBaseUrl,
   hasShippedClientId,
   isClientIdUnset,
+  ConfigError,
   parseConfig,
+  unsubstitutedPlaceholder,
   resolveClientId,
 } from './config.js';
 import { DEFAULT_GROUPS, GROUPS, GROUP_NAMES, scopesForGroups } from './tools/groups.js';
@@ -420,4 +422,61 @@ test('help tells the user which application sign-in will use', () => {
     assert.match(text, /ships no default application/);
     assert.match(text, /microsoft-graph-mcp login --client-id <id>/);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Unsubstituted placeholders
+//
+// A Claude Code plugin manifest interpolates ${user_config.key} before the
+// value reaches us. When it does not — a skipped setting, a mistyped key, a
+// host that does not support the syntax — the literal text arrives instead.
+// The tenant is the dangerous one: it is concatenated into the authority URL,
+// so it fails later and somewhere else.
+// ---------------------------------------------------------------------------
+
+test('an unsubstituted client-id placeholder is refused, not used', () => {
+  const { config, clientIdSource, clientIdReason } = parseConfig([], {
+    MS365_MCP_CLIENT_ID: '${user_config.client_id}',
+  });
+  assert.equal(config.clientId, '');
+  assert.equal(clientIdSource, 'unset');
+  assert.match(String(clientIdReason), /nothing replaced it/);
+});
+
+test('an unsubstituted tenant placeholder throws rather than reaching the authority', () => {
+  assert.throws(
+    () => parseConfig([], { MS365_MCP_TENANT_ID: '${user_config.tenant_id}' }),
+    (err) => err instanceof ConfigError && /nothing replaced it/.test(err.message),
+  );
+});
+
+test('an empty value is absent, not a placeholder failure', () => {
+  const { config, clientIdSource } = parseConfig([], {
+    MS365_MCP_CLIENT_ID: '',
+    MS365_MCP_TENANT_ID: '',
+  });
+  assert.equal(clientIdSource, 'unset');
+  // The server's own default, not the empty string, and never a literal.
+  assert.equal(config.tenantId, 'common');
+  assert.equal(config.authority, 'https://login.microsoftonline.com/common');
+});
+
+test('a real value that merely contains braces is not mistaken for a placeholder', () => {
+  const { config, clientIdSource } = parseConfig(
+    ['--client-id', '11111111-2222-3333-4444-555555555555'],
+    {},
+  );
+  assert.equal(clientIdSource, 'flag');
+  assert.equal(config.clientId, '11111111-2222-3333-4444-555555555555');
+});
+
+test('unsubstitutedPlaceholder matches only a whole ${...} token', () => {
+  assert.equal(unsubstitutedPlaceholder('${user_config.client_id}'), 'user_config.client_id');
+  assert.equal(unsubstitutedPlaceholder('  ${FOO}  '), 'FOO');
+  assert.equal(unsubstitutedPlaceholder('${}'), '');
+  // Not placeholders: a real id, a partial, or text that merely embeds one.
+  assert.equal(unsubstitutedPlaceholder('11111111-2222-3333-4444-555555555555'), null);
+  assert.equal(unsubstitutedPlaceholder('${FOO'), null);
+  assert.equal(unsubstitutedPlaceholder('prefix-${FOO}'), null);
+  assert.equal(unsubstitutedPlaceholder(''), null);
 });

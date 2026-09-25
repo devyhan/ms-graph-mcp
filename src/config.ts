@@ -111,6 +111,38 @@ export function isClientIdUnset(clientId: string): boolean {
 }
 
 /**
+ * A `${...}` placeholder that nothing substituted.
+ *
+ * Both the Claude Code plugin manifest and ordinary shell config interpolate
+ * `${NAME}` before the value reaches us. When that does not happen — a typo in
+ * the key, a config option the user skipped, a syntax the host does not in fact
+ * support — the literal text arrives instead, and it is not inert: an
+ * unsubstituted tenant id is concatenated into the authority URL and the run
+ * fails much later with a confusing Entra error rather than here with a clear
+ * one. Cheap to detect, because no real GUID or tenant name contains braces.
+ */
+export function unsubstitutedPlaceholder(value: string): string | null {
+  const match = value.trim().match(/^\$\{([^}]*)\}$/);
+  return match ? (match[1] ?? '') : null;
+}
+
+/** What to tell someone whose placeholder never got a value. */
+export function placeholderGuidance(field: string, raw: string): string {
+  const key = unsubstitutedPlaceholder(raw) ?? raw;
+  return [
+    `${field} arrived as the literal text "${raw}", which means nothing replaced it.`,
+    '',
+    `If this came from a Claude Code plugin, "${key}" is a plugin setting that was`,
+    'never filled in. Reconfigure the plugin and supply a value.',
+    '',
+    'If it came from a shell or an MCP config, the variable it refers to is unset in',
+    'the environment the server was started from. Note that a GUI-launched client',
+    'does not read your shell profile — export it where that client can see it, or',
+    'pass the value on the command line instead.',
+  ].join('\n');
+}
+
+/**
  * Which candidate supplied `config.clientId`.
  *
  * Reported rather than inferred: the user is about to grant an application
@@ -153,9 +185,22 @@ export interface ClientIdResolution {
  */
 export function resolveClientId(candidates: ClientIdCandidates): ClientIdResolution {
   const flag = candidates.flag?.trim() ?? '';
+  // Checked before the value is accepted, not after: an unsubstituted
+  // placeholder is a configuration mistake wearing the costume of a client ID,
+  // and every later error it causes points somewhere else.
+  if (unsubstitutedPlaceholder(flag) !== null) {
+    return { clientId: '', source: 'unset', reason: placeholderGuidance('--client-id', flag) };
+  }
   if (flag !== '') return { clientId: flag, source: 'flag' };
 
   const env = candidates.env?.trim() ?? '';
+  if (unsubstitutedPlaceholder(env) !== null) {
+    return {
+      clientId: '',
+      source: 'unset',
+      reason: placeholderGuidance('MS365_MCP_CLIENT_ID', env),
+    };
+  }
   if (env !== '') return { clientId: env, source: 'env' };
 
   const shipped = candidates.shipped.trim();
@@ -848,7 +893,16 @@ function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {
     );
   }
 
-  const tenantId = raw.tenantId ?? 'common';
+  // The tenant is the one placeholder that fails silently. It is concatenated
+  // straight into the authority URL, so an unsubstituted value produces a
+  // plausible-looking https://login.microsoftonline.com/${...} and the run dies
+  // much later against Entra, blaming something else. `groups` and the numeric
+  // options are already caught by their own validation.
+  const rawTenant = raw.tenantId ?? '';
+  if (unsubstitutedPlaceholder(rawTenant) !== null) {
+    throw new ConfigError(placeholderGuidance('--tenant-id', rawTenant));
+  }
+  const tenantId = rawTenant === '' ? 'common' : rawTenant;
   const orgMode = raw.orgMode ?? false;
 
   const resolution = resolveClientId({
