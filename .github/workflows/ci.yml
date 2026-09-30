@@ -46,14 +46,20 @@ jobs:
       - name: Test
         run: npm test
 
+      # The guard, and the thing it used to be written with. `node --test dist/`
+      # is what this step exists to prevent, and it was also what this step ran:
+      # on Node 22 and 24 that executes dist/index.js, which serves MCP over
+      # stdio and never returns, so the step hung instead of counting anything.
+      # It goes through the same runner as `npm test` now.
       - name: Assert the full suite ran
         shell: bash
         run: |
-          count=$(node --test dist/ 2>&1 | grep -E '^# tests' | grep -oE '[0-9]+')
+          count=$(node scripts/run-tests.mjs 2>&1 | grep -E '^# tests' | grep -oE '[0-9]+')
           echo "tests discovered: $count"
-          if [ "${count:-0}" -lt 90 ]; then
-            echo "::error::Only $count tests were discovered; the suite should be 90+."
-            echo "A shell that does not expand the test glob silently skips files."
+          if [ "${count:-0}" -lt 150 ]; then
+            echo "::error::Only $count tests were discovered; the suite should be 150+."
+            echo "A runner that silently matches fewer files than it should is the"
+            echo "failure here: 67 of 180 once ran with nothing to say so."
             exit 1
           fi
 
