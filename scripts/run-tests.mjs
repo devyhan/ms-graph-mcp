@@ -56,7 +56,10 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const child = spawn(process.execPath, ['--test', ...files, ...process.argv.slice(2)], {
+// Passthrough args go BEFORE the file list: these are node's own options, and
+// node stops treating them as such once file arguments have started. That is
+// how `--test-reporter=tap` reaches node rather than the test files.
+const child = spawn(process.execPath, ['--test', ...process.argv.slice(2), ...files], {
   stdio: 'inherit',
 });
 child.on('exit', (code, signal) => {

@@ -54,7 +54,11 @@ jobs:
       - name: Assert the full suite ran
         shell: bash
         run: |
-          count=$(node scripts/run-tests.mjs 2>&1 | grep -E '^# tests' | grep -oE '[0-9]+')
+          # --test-reporter=tap is not decoration. Node 24 changed the default
+          # non-TTY reporter from tap to spec, so the summary became
+          # "i pass 180" instead of "# tests 180", this grep matched nothing,
+          # count was empty, and the guard failed a suite that had passed.
+          count=$(node scripts/run-tests.mjs --test-reporter=tap 2>&1 | grep -E '^# tests' | grep -oE '[0-9]+')
           echo "tests discovered: $count"
           if [ "${count:-0}" -lt 150 ]; then
             echo "::error::Only $count tests were discovered; the suite should be 150+."
