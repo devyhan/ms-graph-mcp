@@ -77,13 +77,39 @@ jobs:
             exit 1
           fi
 
+      # A manual run of this workflow against a version already on npm is a
+      # no-op, not a failure: the usual reason to dispatch it is to check that
+      # trusted publishing still authenticates, and leaving a red run behind for
+      # that reads as a broken release.
+      #
+      # A TAG is different. If v0.2.0 is pushed while 0.2.0 is already published,
+      # someone forgot to bump, and that must fail loudly — so this check only
+      # short-circuits the dispatch path.
+      - name: Skip a dispatch for a version already published
+        id: already
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          name="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/$(echo "$name" | sed 's|/|%2F|')/$version")
+          if [ "$code" = "200" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already published; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+            echo "Authentication reached npm, which is what a dispatch usually checks." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Bare, on purpose. prepublishOnly already runs typecheck and the full
       # test suite, and prepack rebuilds dist/ from a clean tree, so a separate
       # test step here would only run everything twice. access and provenance
       # both come from publishConfig.
       - run: npm publish
+        if: steps.already.outputs.published != 'true'
 
       - name: Where to check the attestation
+        if: steps.already.outputs.published != 'true'
         run: |
           echo "Published. Provenance should appear at:" >> "$GITHUB_STEP_SUMMARY"
           echo "https://www.npmjs.com/package/@devyhan/ms-graph-mcp" >> "$GITHUB_STEP_SUMMARY"
