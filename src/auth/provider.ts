@@ -19,7 +19,14 @@ import type {
   InteractiveRequest,
   SilentFlowRequest,
 } from '@azure/msal-node';
-import type { AccountInfo, AuthFlow, AuthProvider, ServerConfig } from '../contracts.js';
+import type {
+  AccountInfo,
+  AuthFlow,
+  AuthProvider,
+  DeviceLoginPrompt,
+  DeviceLoginStatus,
+  ServerConfig,
+} from '../contracts.js';
 import { ADMIN_CONSENT_SCOPES, groupOwningScope } from '../tools/groups.js';
 import { InteractionRequiredError } from '../contracts.js';
 import { clearCache, createCachePlugin } from './token-cache.js';
@@ -176,11 +183,15 @@ function signInRequiredMessage(scopes: string[], detail?: string): string {
     const owners = [...new Set(admin.map((scope) => groupOwningScope(scope)).filter(Boolean))];
     parts.push(
       `Signing in again will NOT fix this: ${admin.join(', ')} ${admin.length === 1 ? 'is a scope' : 'are scopes'} only a Microsoft 365 tenant administrator can consent to for this application.`,
-      `Ask an administrator to grant ${admin.join(' ')} to this application, then run the \`login\` command again with \`--org-mode\` and the owning tool ${owners.length === 1 ? 'group' : 'groups'} enabled (${owners.join(', ')}).`,
+      `Ask an administrator to grant ${admin.join(' ')} to this application, then sign in again with \`--org-mode\` and the owning tool ${owners.length === 1 ? 'group' : 'groups'} enabled (${owners.join(', ')}) — \`npx @devyhan/ms-graph-mcp login --org-mode --groups …\`.`,
     );
   } else {
+    // No terminal instruction here. This string is nested inside the tool result
+    // as `Detail:`, under a headline that already says to call auth_begin_login,
+    // and two different instructions in one response is how a reader ends up
+    // following the wrong one. It also used to name the pre-rename package.
     parts.push(
-      "Run the server's `login` command in a terminal (for example `npx ms-graph-mcp login`), complete the sign-in, then retry.",
+      'A sign-in is needed. From a tool call, `auth_begin_login` starts one; from a terminal, `npx @devyhan/ms-graph-mcp login` does.',
     );
   }
 
@@ -518,7 +529,12 @@ function announceDeviceCode(response: DeviceCodeResponse): void {
  * is gone by then and cannot be recovered from MSAL.
  */
 function isDeviceCodeMissing(response: DeviceCodeResponse): boolean {
-  return typeof response.userCode !== 'string' || typeof response.verificationUri !== 'string';
+  // Emptiness counts, not just absence. A response carrying `userCode: ''` is a
+  // response with no code in it, and telling someone to "enter the code " is the
+  // failure this function exists to stop — checking only the type let that
+  // through.
+  const present = (value: unknown): boolean => typeof value === 'string' && value.trim() !== '';
+  return !present(response.userCode) || !present(response.verificationUri);
 }
 
 /**
@@ -726,7 +742,149 @@ export function createAuthProvider(opts: {
     }
   }
 
+  /**
+   * A device-code sign-in in flight, kept because a tool call cannot block for
+   * the minutes a person needs to finish one.
+   *
+   * MSAL does the polling: `acquireTokenByDeviceCode` returns a promise that
+   * settles when the person finishes, and the code arrives earlier through the
+   * callback. So the tool that starts a sign-in awaits the CODE, not the
+   * PROMISE, and the tool that reports progress reads the flags this object
+   * carries. Nothing here holds a token.
+   */
+  let pending:
+    | {
+        prompt: DeviceLoginPrompt;
+        state: 'pending' | 'signedIn' | 'failed';
+        detail?: string;
+      }
+    | null = null;
+
+  /**
+   * A start that has not yet produced a code.
+   *
+   * Two tool calls can arrive before MSAL has said anything, and `pending` is
+   * only written from inside the callback, so a guard that reads it would not
+   * have fired yet: both calls would start a flow and the code the first caller
+   * was already shown would be dead. Sharing the in-flight promise is what makes
+   * "asking twice returns the same code" true rather than merely usually true.
+   */
+  let starting: Promise<DeviceLoginPrompt> | null = null;
+
+  async function beginDeviceLogin(scopes: string[]): Promise<DeviceLoginPrompt> {
+    // A live code is reused rather than replaced. Starting a fresh flow would
+    // hand out a second code and silently invalidate the one being typed.
+    if (pending?.state === 'pending' && Date.parse(pending.prompt.expiresAt) > Date.now()) {
+      return pending.prompt;
+    }
+    if (starting !== null) return starting;
+
+    let deliverPrompt: (prompt: DeviceLoginPrompt) => void = () => {};
+    let failPrompt: (error: unknown) => void = () => {};
+    const prompted = new Promise<DeviceLoginPrompt>((resolve, reject) => {
+      deliverPrompt = resolve;
+      failPrompt = reject;
+    });
+
+    const entry: { prompt: DeviceLoginPrompt; state: 'pending' | 'signedIn' | 'failed'; detail?: string } = {
+      // Replaced the moment the callback fires; `prompted` is what the caller
+      // waits on, so this placeholder is never observable.
+      prompt: { userCode: '', verificationUri: '', expiresAt: '', pollIntervalSeconds: 5 },
+      state: 'pending',
+    };
+
+    // Set BEFORE the call, not after it. MSAL may invoke deviceCodeCallback
+    // synchronously, and the callback clears this; assigning afterwards would
+    // overwrite that clear with a stale promise and the guard would then hold
+    // for the life of the flow rather than until a code exists.
+    starting = prompted;
+
+    void pca
+      .acquireTokenByDeviceCode({
+        scopes: withRefreshScope(scopes),
+        deviceCodeCallback: (response) => {
+          if (isDeviceCodeMissing(response)) {
+            const error = new Error(deviceCodeRejectedMessage(config, clientIdSource));
+            failPrompt(error);
+            throw error;
+          }
+          const prompt: DeviceLoginPrompt = {
+            userCode: response.userCode,
+            verificationUri: response.verificationUri,
+            expiresAt: new Date(Date.now() + response.expiresIn * 1000).toISOString(),
+            pollIntervalSeconds: Math.max(1, response.interval),
+          };
+          entry.prompt = prompt;
+          pending = entry;
+          deliverPrompt(prompt);
+          // The guard covers exactly the window before a code exists. Past this
+          // point the expiry check above decides whether to reuse, and holding
+          // it any longer would stop a dead code ever being replaced.
+          starting = null;
+        },
+      })
+      .then(
+        (result) => {
+          if (result === null) {
+            entry.state = 'failed';
+            entry.detail = 'Microsoft Entra returned no result for the device code.';
+          } else {
+            entry.state = 'signedIn';
+            // The account cache is keyed on a session that did not exist a
+            // moment ago, so force the next read to go to MSAL.
+            cachedAccount = null;
+          }
+        },
+        (err: unknown) => {
+          entry.state = 'failed';
+          entry.detail = describeError(err);
+          // The caller may still be waiting for a code that is never coming:
+          // MSAL rejects before the callback for anything that stops the device
+          // authorization request itself — no network, a proxy or TLS failure, a
+          // tenant that does not resolve. Without this the tool call waits for
+          // ever, which is worse than the error it is hiding. Rejecting an
+          // already-resolved promise is a no-op, so the normal path is
+          // unaffected.
+          failPrompt(err);
+          starting = null;
+          // Nothing arrived, so there is no code to report a state for. Leaving
+          // `pending` set would answer "pending" about a flow that is dead.
+          if (pending !== entry) pending = null;
+        },
+      );
+
+    return prompted;
+  }
+
   return {
+    async beginDeviceLogin(scopes: string[]): Promise<DeviceLoginPrompt> {
+      try {
+        return await beginDeviceLogin(scopes);
+      } catch (err) {
+        throwIfAppUnavailable(err);
+        throw err;
+      }
+    },
+
+    async deviceLoginStatus(): Promise<DeviceLoginStatus> {
+      if (pending === null) return { state: 'none' };
+      if (pending.state === 'signedIn') {
+        const account = await resolveAccount(true);
+        return { state: 'signedIn', account: account?.username ?? undefined };
+      }
+      if (pending.state === 'failed') {
+        return { state: 'failed', detail: pending.detail };
+      }
+      if (Date.parse(pending.prompt.expiresAt) <= Date.now()) {
+        return {
+          state: 'expired',
+          detail: 'The code timed out. Start another sign-in to get a fresh one.',
+          prompt: pending.prompt,
+        };
+      }
+      return { state: 'pending', prompt: pending.prompt };
+    },
+
     async getToken(scopes: string[]): Promise<string> {
       const account = await resolveAccount();
       if (!account) {

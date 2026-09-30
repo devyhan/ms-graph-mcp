@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { scopeReadingOnlyAuth } from './auth/index.js';
 import test from 'node:test';
 
 import {
@@ -534,7 +535,12 @@ test('every scope a tool in an admin-consent group needs is marked as such', () 
     orgMode: true,
     readOnly: false,
   };
-  const tools = collectTools({ graph: inertGraph(), config });
+  const tools = collectTools({
+    graph: inertGraph(),
+    config,
+    auth: scopeReadingOnlyAuth(),
+    consentScopes: () => [],
+  });
   const alwaysRequested = new Set(['User.Read', 'offline_access']);
 
   const missed: string[] = [];

@@ -169,16 +169,26 @@ You still need your own Entra application — see
 this project publishes no shared one. Paste its **Application (client) ID** into the
 first prompt.
 
-Sign-in remains a terminal step, once:
+Then sign in without leaving the conversation. Ask Claude to sign you in, or say
+so when a tool reports there is no session: it calls `auth_begin_login`, which
+returns a short code and a URL. Open the URL, enter the code, and Claude confirms
+with `auth_login_status`.
+
+That is the device authorization grant, and it is the only sign-in shape that
+works from inside a tool call. The browser flow cannot: the MCP transport owns
+stdout, so there is nowhere to prompt and nothing may be written there. A device
+code needs no local interaction at all — the code travels back as ordinary tool
+output and you finish in whatever browser you like.
+
+The terminal route still exists and is better when you have a terminal open
+anyway, because it opens the browser for you:
 
 ```
 npx @devyhan/ms-graph-mcp login
 ```
 
-The server will not open a browser from inside a Claude Code session. The MCP
-transport owns stdout, and a sign-in prompt in the middle of a tool call would
-corrupt the JSON-RPC stream, so it returns an error telling you to run `login`
-instead. See [How sign-in works](#how-sign-in-works).
+Either way the session lands in the same encrypted cache, so signing in one way
+and using the other is fine. See [How sign-in works](#how-sign-in-works).
 
 Everything works before you configure anything: the server starts, lists its tools,
 and `status` explains what is missing. An installed-but-unconfigured plugin shows a
@@ -379,7 +389,9 @@ Both sign-in flows are OAuth 2.0, and both end with the same delegated access to
 
 **The session is a refresh token in an encrypted cache.** What sign-in leaves behind is the MSAL cache blob, encrypted with AES-256-GCM into `token-cache.enc` in your config directory (`~/.config/microsoft-graph-mcp` on macOS and Linux, `%APPDATA%\microsoft-graph-mcp` on Windows), with the 32-byte key beside it in `cache.key` at mode `0600`. See [Security](#security) for the details and for `--cache-dir`.
 
-**`getToken` never prompts.** In `serve` mode the server refreshes access tokens silently and does nothing else. When the refresh token has expired, been revoked, or no longer covers a scope, the tool call returns an error telling you to run `login` again rather than starting a sign-in. That is deliberate: the MCP transport owns stdout, so a prompt or a browser launched in the middle of a request would corrupt the JSON-RPC stream. Sign-in happens out of band, in a terminal.
+**`getToken` never prompts.** In `serve` mode the server refreshes access tokens silently and does nothing else. When the refresh token has expired, been revoked, or no longer covers a scope, the tool call returns an error rather than starting a sign-in behind your back. That is deliberate: the MCP transport owns stdout, so a prompt or a browser launched in the middle of a request would corrupt the JSON-RPC stream.
+
+**Signing in from a tool call.** A sign-in the caller asked for is a different thing from one that starts itself mid-request, and `auth_begin_login` is that first thing. It runs the device grant, which needs no local interaction: it returns a code and a URL as ordinary tool output, you finish in a browser, and `auth_login_status` reports when you are done. Neither tool ever returns a token, both survive `--read-only` — signing in changes nothing in the tenant — and both stay visible under `--discovery`, because a caller with no session cannot invoke a tool it has not discovered. The two sign-in paths ask for exactly the same scopes and leave the session in the same encrypted cache, so you can start in the conversation and carry on from the terminal or the other way round.
 
 **This is a local server.** It does not implement the MCP authorization specification, and per that specification it should not: the spec covers HTTP transports and directs stdio servers to take credentials from the environment instead. So the server obtains user credentials itself, as an ordinary public OAuth client, and the MCP client is not involved in authentication at all. A remote HTTP mode — where the MCP client performs OAuth against Entra and the server exchanges that token for a Graph token on the user's behalf — is not implemented.
 
@@ -415,7 +427,7 @@ The server sorts these into three kinds, and only one of them falls back.
 
 ## Tools
 
-102 tools across 14 groups. `--read-only` removes every write tool, leaving 71. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
+104 tools across 14 groups. `--read-only` removes every write tool, leaving 73. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
 
 ### Tool groups
 
@@ -436,7 +448,7 @@ Tools are grouped by product area. Enable only the groups you need — the scope
 | `teams` | Teams teams, channels, channel messages | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `TeamMember.Read.All` | **Yes** | 9 |
 | `directory` | Entra ID user and group lookups | `User.Read.All`, `Group.Read.All` | **Yes** | 9 |
 | `intune` | Intune managed device inventory | `DeviceManagementManagedDevices.Read.All` | **Yes** | 6 |
-| `generic` | Any Graph endpoint, plus introspection | reuses the union of the above | No | 3 |
+| `generic` | Signing in, any Graph endpoint, introspection | reuses the union of the above | No | 5 |
 
 `offline_access` and `User.Read` are always requested: the first keeps refresh tokens working, the second identifies the account.
 
@@ -672,12 +684,14 @@ Advanced queries against the directory need the `ConsistencyLevel: eventual` hea
 </details>
 
 <details>
-<summary><b><code>graph</code></b> — Generic: 3 tools, 1 of them writes</summary>
+<summary><b><code>graph</code></b> — Generic: 5 tools, 1 of them writes</summary>
 
-Always enabled and not selectable. `graph_request` is the escape hatch for endpoints no purpose-built tool covers.
+Always enabled and not selectable. Signing in lives here because it is needed before anything else works, and `graph_request` is the escape hatch for endpoints no purpose-built tool covers.
 
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
+| `auth_begin_login` |  | Starts signing the user in and returns a short code with the URL to enter it at. Returns as soon as there is a code, not when the sign-in is done; calling it again while a code is live returns the same one. No token is ever returned. | none |
+| `auth_login_status` |  | Reports where a sign-in has got to: pending, signedIn, expired, failed or none. Never returns a token. | none |
 | `graph_request` | **write** | Sends an arbitrary request to Microsoft Graph and returns the raw JSON response. | **`path`**, `method`, `version`, `query`, `body`, `maxPages` |
 | `graph_schema` |  | Fetches one item from a Graph path ($top=1) and reports the property names it carries with their JSON types, plus the @odata.context that names the resource type. | **`entityPath`**, `version` |
 | `graph_list_permissions` |  | Reports how this server is configured: which tool groups are enabled, the delegated Microsoft Graph scopes each one uses, which of them need a tenant administrator to consent, whether write tools are suppressed, and the signed-in account. | none |
@@ -733,7 +747,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 
 `MS365_MCP_AUTH_FLOW=interactive`, the undocumented value that used to select the browser flow, is still accepted as an alias for `browser`.
 
-`--discovery` is worth knowing about: with every group enabled the server exposes 102 tools, and 102 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees three tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, and `graph_list_permissions` reports the configuration. The model pays for a tool's schema only when it actually calls it.
+`--discovery` is worth knowing about: with every group enabled the server exposes 104 tools, and 104 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees five tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, `graph_list_permissions` reports the configuration, and `auth_begin_login` with `auth_login_status` sign you in. The last two are exposed here deliberately: a caller with no session cannot reach a tool through `call_tool` that it has not discovered yet, and signing in is the first thing such a caller needs. The model pays for a tool's schema only when it actually calls it.
 
 ## Security
 

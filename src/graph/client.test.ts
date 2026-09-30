@@ -47,6 +47,12 @@ function stubAuth(): AuthProvider & { readonly tokens: string[] } {
     async login() {
       throw new Error('login is not exercised by these tests');
     },
+    async beginDeviceLogin() {
+      throw new Error('sign-in is not exercised by these tests');
+    },
+    async deviceLoginStatus() {
+      return { state: 'none' as const };
+    },
     async logout() {
       // no session to clear
     },

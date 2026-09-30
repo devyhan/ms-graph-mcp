@@ -4,7 +4,7 @@
  * consent to on their own.
  */
 
-import type { ToolGroupMeta } from '../contracts.js';
+import type { ServerConfig, ToolDefinition, ToolGroupMeta } from '../contracts.js';
 
 /**
  * Admin-consent flags come from Microsoft's permissions reference and are NOT
@@ -284,4 +284,30 @@ export function groupOwningScope(scope: string): string | undefined {
     fallback ??= meta.name;
   }
   return fallback;
+}
+
+/**
+ * Every delegated scope a configuration will ask consent for.
+ *
+ * The group catalogue is the coarse grouping and individual tools declare
+ * extras it does not list — `me_get_mailbox_settings` needs
+ * MailboxSettings.Read, `calendar_get_schedule` needs Calendars.Read.Shared,
+ * `files_list_shared` needs Files.Read.All, `search_query` needs Chat.Read.
+ *
+ * Both sign-in paths go through this. They used not to: the CLI computed the
+ * union while the in-conversation tool asked only for the group scopes, so a
+ * default install that signed in from the conversation was left with five tools
+ * that returned 403 for ever, with nothing to suggest a second sign-in would
+ * help. One function is the only way that stays fixed.
+ */
+export function consentScopesFor(
+  config: Pick<ServerConfig, 'groups' | 'readOnly'>,
+  tools: readonly ToolDefinition[],
+): string[] {
+  const scopes = new Set(scopesForGroups(config.groups, config.readOnly));
+  for (const tool of tools) {
+    if (config.readOnly && tool.write === true) continue;
+    for (const scope of tool.scopes) scopes.add(scope);
+  }
+  return [...scopes].sort();
 }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { scopeReadingOnlyAuth } from '../auth/index.js';
 import test from 'node:test';
 
 import type {
@@ -75,7 +76,7 @@ function stubGraph(): GraphClient & { readonly sent: Sent[] } {
 
 function build(): { tool: ToolDefinition; graph: ReturnType<typeof stubGraph> } {
   const graph = stubGraph();
-  const found = searchModule.build({ graph, config }).find((t) => t.name === 'search_query');
+  const found = searchModule.build({ graph, config, auth: scopeReadingOnlyAuth(), consentScopes: () => [] }).find((t) => t.name === 'search_query');
   assert.ok(found !== undefined, 'search_query should exist');
   return { tool: found, graph };
 }

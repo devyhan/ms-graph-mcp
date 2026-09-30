@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { scopeReadingOnlyAuth } from '../auth/index.js';
 import test from 'node:test';
 
 import type {
@@ -193,7 +194,7 @@ function stubGraph(stub: { nextLink?: string } = {}): GraphClient & { readonly r
 
 function tool(name: string, stub: { nextLink?: string } = {}): ToolDefinition {
   const graph = stubGraph(stub);
-  const found = mailModule.build({ graph, config }).find((entry) => entry.name === name);
+  const found = mailModule.build({ graph, config, auth: scopeReadingOnlyAuth(), consentScopes: () => [] }).find((entry) => entry.name === name);
   assert.ok(found !== undefined, `${name} should exist`);
   return found;
 }

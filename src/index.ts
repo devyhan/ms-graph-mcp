@@ -11,7 +11,7 @@
 import type { AuthProvider, GraphClient, ServerConfig, ToolDefinition } from './contracts.js';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
-import { cachePaths, clearCache, createAuthProvider, describeAccount } from './auth/index.js';
+import { cachePaths, clearCache, createAuthProvider, describeAccount, scopeReadingOnlyAuth } from './auth/index.js';
 import type { ClientIdSource, ParsedConfig } from './config.js';
 import {
   ConfigError,
@@ -25,7 +25,7 @@ import {
 } from './config.js';
 import { createGraphClient } from './graph/client.js';
 import { collectTools, createServerFactory } from './server.js';
-import { ADMIN_CONSENT_SCOPES, GROUPS, scopesForGroups } from './tools/groups.js';
+import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
 
 /** Scopes every session asks for regardless of which groups are enabled. */
@@ -71,7 +71,14 @@ function buildSession(config: ServerConfig, clientIdSource: ClientIdSource): Ses
   // the moment a shared application ships as the default.
   const auth = createAuthProvider({ config, clientIdSource });
   const graph = createGraphClient({ auth, config });
-  return { auth, graph, tools: collectTools({ graph, config }) };
+
+  // The consent set is computed FROM the catalogue, and the catalogue is what
+  // these deps are being passed to build. The closure reads a list filled in on
+  // the next line, so by the time any handler calls it the answer is complete —
+  // and both sign-in paths then quote the same set.
+  let tools: ToolDefinition[] = [];
+  tools = collectTools({ graph, config, auth, consentScopes: () => consentScopesFor(config, tools) });
+  return { auth, graph, tools };
 }
 
 /**
@@ -104,13 +111,9 @@ function describeAuthFlow(config: ServerConfig): string {
   }
 }
 
+/** Kept as a local name; the computation itself is shared with the sign-in tool. */
 function consentScopes(config: ServerConfig, tools: ToolDefinition[]): string[] {
-  const scopes = new Set(scopesForGroups(config.groups, config.readOnly));
-  for (const tool of tools) {
-    if (config.readOnly && tool.write === true) continue;
-    for (const scope of tool.scopes) scopes.add(scope);
-  }
-  return [...scopes].sort();
+  return consentScopesFor(config, tools);
 }
 
 /** The same scope set, attributed to the group that asks for it. */
@@ -217,7 +220,16 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
   const unset = isClientIdUnset(config.clientId);
   // No client ID means no MSAL and no account to look up, but the rest of the
   // report is still worth printing — that is how a user diagnoses the gap.
-  const tools = collectTools({ graph: inertGraphClient(), config });
+  const tools = (() => {
+    let built: ToolDefinition[] = [];
+    built = collectTools({
+      graph: inertGraphClient(),
+      config,
+      auth: scopeReadingOnlyAuth(),
+      consentScopes: () => consentScopesFor(config, built),
+    });
+    return built;
+  })();
 
   out(`microsoft-graph-mcp ${packageVersion()}\n\n`);
   out(`${pad('Account:')}${unset ? 'no client ID configured' : await currentAccount(config)}\n`);
@@ -271,7 +283,16 @@ async function currentAccount(config: ServerConfig): Promise<string> {
 }
 
 function runPermissions(config: ServerConfig): number {
-  const tools = collectTools({ graph: inertGraphClient(), config });
+  const tools = (() => {
+    let built: ToolDefinition[] = [];
+    built = collectTools({
+      graph: inertGraphClient(),
+      config,
+      auth: scopeReadingOnlyAuth(),
+      consentScopes: () => consentScopesFor(config, built),
+    });
+    return built;
+  })();
 
   out('Delegated Microsoft Graph permissions for this configuration.\n');
   out(`Mode: ${config.readOnly ? 'read-only (write scopes omitted)' : 'read-write'}\n\n`);

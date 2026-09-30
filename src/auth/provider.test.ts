@@ -604,3 +604,262 @@ test('the refusal message names the app and its origin but invents no AADSTS cod
   assert.doesNotMatch(message, /AADSTS\d/);
   assert.equal(isAppUnavailable(new Error(message)), false);
 });
+
+// ---------------------------------------------------------------------------
+// Device sign-in, started from a tool call
+// ---------------------------------------------------------------------------
+
+/**
+ * The thing these guard is a shape, not a detail: `beginDeviceLogin` must return
+ * when the CODE exists, not when the sign-in finishes. A tool call cannot sit
+ * for the minutes a person takes, and before these tools existed there was no
+ * way to authenticate from inside a conversation at all — `login` was a CLI
+ * subcommand, so anyone installing this as a plugin had to go and find a
+ * terminal first.
+ *
+ * So the stub below hands back a promise the test settles by hand. A stub that
+ * resolves immediately would pass whether or not the implementation waited.
+ */
+function deferredDeviceClient(
+  response: Parameters<DeviceCodeRequest['deviceCodeCallback']>[0],
+  opts: { accounts?: MsalAccountInfo[] } = {},
+): FakeClient & { settle: (result: 'ok' | Error) => void; starts: () => number } {
+  const device: DeviceCodeRequest[] = [];
+  let finish: (value: 'ok' | Error) => void = () => {};
+  const gate = new Promise<'ok' | Error>((resolve) => {
+    finish = resolve;
+  });
+
+  return {
+    interactive: [],
+    device,
+    silent: [],
+    starts: () => device.length,
+    settle: (result: 'ok' | Error) => finish(result),
+    async acquireTokenSilent() {
+      return authResult();
+    },
+    async acquireTokenInteractive() {
+      return authResult();
+    },
+    async acquireTokenByDeviceCode(request: DeviceCodeRequest) {
+      device.push(request);
+      request.deviceCodeCallback(response);
+      const outcome = await gate;
+      if (outcome !== 'ok') throw outcome;
+      return authResult();
+    },
+    getTokenCache() {
+      return {
+        async getAllAccounts() {
+          return [...(opts.accounts ?? [])];
+        },
+        async removeAccount() {
+          // not exercised here
+        },
+      };
+    },
+  } as unknown as FakeClient & { settle: (result: 'ok' | Error) => void; starts: () => number };
+}
+
+function deviceCode(
+  over: Partial<{ userCode: string; verificationUri: string; expiresIn: number; interval: number }> = {},
+): Parameters<DeviceCodeRequest['deviceCodeCallback']>[0] {
+  return {
+    userCode: 'ABCD-EFGH',
+    deviceCode: 'device-code-value',
+    verificationUri: 'https://example.test/device',
+    expiresIn: 900,
+    interval: 5,
+    message: 'Open the page and enter the code.',
+    ...over,
+  } as unknown as Parameters<DeviceCodeRequest['deviceCodeCallback']>[0];
+}
+
+const CODE = deviceCode();
+
+test('starting a sign-in returns the code without waiting for the person', async () => {
+  const client = deferredDeviceClient(CODE);
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  // If this awaited the flow it would hang here: the stub never settles.
+  const prompt = await provider.beginDeviceLogin(SCOPES);
+
+  assert.equal(prompt.userCode, 'ABCD-EFGH');
+  assert.equal(prompt.verificationUri, 'https://example.test/device');
+  assert.equal(prompt.pollIntervalSeconds, 5);
+  assert.ok(Date.parse(prompt.expiresAt) > Date.now(), 'expiry is an instant in the future');
+});
+
+test('asking again while a code is live returns that code, not a second one', async () => {
+  // A second flow would hand out a new code and silently invalidate the one the
+  // person is in the middle of typing.
+  const client = deferredDeviceClient(CODE);
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  const first = await provider.beginDeviceLogin(SCOPES);
+  const second = await provider.beginDeviceLogin(SCOPES);
+
+  assert.deepEqual(second, first);
+  assert.equal(client.starts(), 1, 'only one device-code flow should have been started');
+});
+
+test('status moves from pending to signed in, and names the account', async () => {
+  const client = deferredDeviceClient(CODE, { accounts: [ACCOUNT] });
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  assert.deepEqual(await provider.deviceLoginStatus(), { state: 'none' });
+
+  await provider.beginDeviceLogin(SCOPES);
+  const pending = await provider.deviceLoginStatus();
+  assert.equal(pending.state, 'pending');
+  assert.equal(pending.prompt?.userCode, 'ABCD-EFGH', 'the code is repeated so it can be shown again');
+
+  client.settle('ok');
+  await new Promise((r) => setImmediate(r));
+
+  const done = await provider.deviceLoginStatus();
+  assert.equal(done.state, 'signedIn');
+  assert.equal(done.account, ACCOUNT.username);
+});
+
+test('a refused sign-in reports failed, with the reason', async () => {
+  const client = deferredDeviceClient(CODE);
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await provider.beginDeviceLogin(SCOPES);
+  client.settle(new Error('AADSTS65004: user declined the consent'));
+  await new Promise((r) => setImmediate(r));
+
+  const status = await provider.deviceLoginStatus();
+  assert.equal(status.state, 'failed');
+  assert.match(String(status.detail), /AADSTS65004/);
+});
+
+test('status never carries a token, in any state', async () => {
+  // SECURITY.md puts "the model must never see a token" in scope, and a status
+  // field is exactly where one leaks by accident.
+  const client = deferredDeviceClient(CODE, { accounts: [ACCOUNT] });
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  const seen: unknown[] = [await provider.deviceLoginStatus()];
+  await provider.beginDeviceLogin(SCOPES);
+  seen.push(await provider.deviceLoginStatus());
+  client.settle('ok');
+  await new Promise((r) => setImmediate(r));
+  seen.push(await provider.deviceLoginStatus());
+
+  const serialized = JSON.stringify(seen);
+  for (const forbidden of ['accessToken', 'access_token', 'idToken', 'refreshToken', 'Bearer']) {
+    assert.ok(!serialized.includes(forbidden), `${forbidden} must not appear in a status`);
+  }
+  assert.ok(!serialized.includes(authResult().accessToken), 'nor the token value itself');
+});
+
+test('an expired code is reported as expired rather than pending forever', async () => {
+  const client = deferredDeviceClient(deviceCode({ expiresIn: 0 }));
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await provider.beginDeviceLogin(SCOPES);
+  const status = await provider.deviceLoginStatus();
+
+  assert.equal(status.state, 'expired');
+  assert.match(String(status.detail), /Start another sign-in/);
+});
+
+test('an expired code is not reused when a new sign-in is asked for', async () => {
+  const client = deferredDeviceClient(deviceCode({ expiresIn: 0 }));
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await provider.beginDeviceLogin(SCOPES);
+  await provider.beginDeviceLogin(SCOPES);
+
+  assert.equal(client.starts(), 2, 'a dead code must be replaced, not handed out again');
+});
+
+test('a registration that cannot issue device codes says so rather than hanging', async () => {
+  // MSAL calls the callback synchronously and rethrows what it throws, so this
+  // is the last point at which a refusal is still distinguishable from a token
+  // endpoint failure minutes later.
+  const client = deferredDeviceClient(deviceCode({ userCode: '', verificationUri: '' }));
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await assert.rejects(() => provider.beginDeviceLogin(SCOPES), /public client|device code|Allow public/i);
+});
+
+test('a failure before any code is issued rejects instead of waiting for ever', async () => {
+  // Offline, a proxy or TLS failure, a tenant that does not resolve: MSAL
+  // rejects before deviceCodeCallback ever fires, so nothing resolves the
+  // promise the caller is holding. It used to wait for ever, which is worse
+  // than the error it was hiding, and a tool call cannot be cancelled.
+  const client = {
+    async acquireTokenSilent() {
+      throw new Error('not exercised');
+    },
+    async acquireTokenInteractive() {
+      throw new Error('not exercised');
+    },
+    async acquireTokenByDeviceCode() {
+      throw new Error('getaddrinfo ENOTFOUND login.microsoftonline.com');
+    },
+    getTokenCache() {
+      return {
+        async getAllAccounts() {
+          return [];
+        },
+        async removeAccount() {
+          // not exercised
+        },
+      };
+    },
+  } as unknown as FakeClient;
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await assert.rejects(() => provider.beginDeviceLogin(SCOPES), /ENOTFOUND/);
+  // And it does not leave a dead flow behind claiming to be pending.
+  assert.deepEqual(await provider.deviceLoginStatus(), { state: 'none' });
+});
+
+test('two sign-ins started at once share one code', async () => {
+  // `pending` is written from inside the callback, so a guard that reads it has
+  // nothing to read while the first request is still in the air. Two calls would
+  // each start a flow and the code the first caller was already shown would be
+  // dead on arrival.
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started: unknown[] = [];
+  const client = {
+    async acquireTokenSilent() {
+      throw new Error('not exercised');
+    },
+    async acquireTokenInteractive() {
+      throw new Error('not exercised');
+    },
+    async acquireTokenByDeviceCode(request: DeviceCodeRequest) {
+      started.push(request);
+      await gate;
+      request.deviceCodeCallback(deviceCode());
+      return authResult();
+    },
+    getTokenCache() {
+      return {
+        async getAllAccounts() {
+          return [ACCOUNT];
+        },
+        async removeAccount() {
+          // not exercised
+        },
+      };
+    },
+  } as unknown as FakeClient;
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  const both = Promise.all([provider.beginDeviceLogin(SCOPES), provider.beginDeviceLogin(SCOPES)]);
+  release();
+  const [first, second] = await both;
+
+  assert.equal(started.length, 1, 'one flow, not two');
+  assert.deepEqual(second, first);
+});

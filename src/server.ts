@@ -57,8 +57,19 @@ const MODULES: Record<string, ToolModule> = {
   intune: intuneModule,
 };
 
-/** The tool always exposed in discovery mode alongside the discovery pair. */
-const PERMISSIONS_TOOL = 'graph_list_permissions';
+/**
+ * Tools always exposed in discovery mode alongside the discovery pair.
+ *
+ * `graph_list_permissions` is here so a caller can see what is switched on when
+ * something returns 403. The sign-in pair is here for a blunter reason: a user
+ * with no session cannot use `call_tool` to reach a tool they cannot discover,
+ * and telling someone to open a terminal was the whole problem these two solve.
+ */
+const ALWAYS_EXPOSED = new Set([
+  'graph_list_permissions',
+  'auth_begin_login',
+  'auth_login_status',
+]);
 
 /**
  * Tools whose effect a user cannot undo from inside this server: mail leaves
@@ -106,6 +117,40 @@ export function collectTools(deps: ToolDeps): ToolDefinition[] {
   return tools;
 }
 
+/**
+ * What a client is actually offered, which is not the same as what the catalogue
+ * holds.
+ *
+ * Extracted so a test can assert on it. The version of this that lived inside
+ * the factory closure could only be checked by reaching into a running server,
+ * so the test that claimed to cover discovery-mode exposure asserted on the
+ * catalogue instead and would have passed with the sign-in tools hidden.
+ */
+export function exposedTools(
+  tools: readonly ToolDefinition[],
+  config: ServerConfig,
+): ToolDefinition[] {
+  const available = config.readOnly ? tools.filter((tool) => tool.write !== true) : [...tools];
+
+  // Discovery gets the unfiltered catalogue on purpose: it applies --read-only
+  // itself, and knowing a suppressed tool exists is how `call_tool` can explain
+  // why it will not run rather than claiming the name is unknown.
+  return config.discovery
+    ? [
+        ...buildDiscoveryTools([...tools], config),
+        ...available.filter((tool) => ALWAYS_EXPOSED.has(tool.name)),
+      ]
+    : available;
+}
+
+/** The same, by name. */
+export function exposedToolNames(
+  tools: readonly ToolDefinition[],
+  config: ServerConfig,
+): string[] {
+  return exposedTools(tools, config).map((tool) => tool.name);
+}
+
 /** Renders a Graph failure as text the model can act on without a stack trace. */
 function describeGraphError(error: GraphError): string {
   const lines = [
@@ -127,17 +172,27 @@ function signInMessage(error: InteractionRequiredError): string {
     return [
       'Blocked by missing tenant admin consent — not by a missing sign-in.',
       `This call needs ${list}, which only a Microsoft 365 administrator can grant for this ` +
-        'application. Tell the user what to ask for rather than asking them to sign in again, ' +
-        'which will not change the outcome.',
+        'application. Tell the user what to ask for. Signing in will not change the outcome, so ' +
+        'do not offer `auth_begin_login` for this one — the consent prompt cannot grant a scope ' +
+        'the tenant reserves to an administrator, however many times it is accepted.',
       `Detail: ${error.message}`,
     ].join('\n');
   }
 
+  // This message is the main thing that decides whether anyone ever signs in, so
+  // it names the tool to call. It used to say "run login in a terminal", which
+  // was the only option at the time and was also the reason plugin users
+  // reported they could not sign in at all: nothing in the catalogue offered it,
+  // and nothing here told them a catalogue was not where to look.
   return [
     'Not signed in to Microsoft 365, or the stored session can no longer be refreshed.',
-    'The user must run `npx @devyhan/ms-graph-mcp login` in a terminal, complete the sign-in, ' +
-      'and then retry this call. This server cannot prompt for credentials itself, because ' +
-      'the MCP transport owns stdio.',
+    'Call `auth_begin_login` to sign the user in from here. It returns a short code and a URL: ' +
+      'show them both exactly as given, tell the user the code is entered on that page rather ' +
+      'than typed back into this conversation, and then call `auth_login_status` to see whether ' +
+      'they finished. Do not ask them to open a terminal — that was the old answer and it is no ' +
+      'longer the only one.',
+    'A terminal still works if they prefer it, and opens the browser for them: ' +
+      '`npx @devyhan/ms-graph-mcp login`.',
     `Detail: ${error.message}`,
   ].join('\n');
 }
@@ -158,17 +213,7 @@ interface FactoryDeps {
 export function createServerFactory(deps: FactoryDeps): () => McpServer {
   const { config, tools } = deps;
 
-  const available = config.readOnly ? tools.filter((tool) => tool.write !== true) : tools;
-
-  // Discovery gets the unfiltered catalogue on purpose: it applies --read-only
-  // itself, and knowing a suppressed tool exists is how `call_tool` can explain
-  // why it will not run rather than claiming the name is unknown.
-  const exposed = config.discovery
-    ? [
-        ...buildDiscoveryTools(tools, config),
-        ...available.filter((tool) => tool.name === PERMISSIONS_TOOL),
-      ]
-    : available;
+  const exposed = exposedTools(tools, config);
 
   return function factory(): McpServer {
     const server = new McpServer(

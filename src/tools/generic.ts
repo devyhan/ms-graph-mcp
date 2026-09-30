@@ -200,11 +200,74 @@ function describeProperties(entity: Record<string, unknown>): Array<{
 
 export const genericModule: ToolModule = {
   group: GROUP,
-  build({ graph, config }: ToolDeps): ToolDefinition[] {
+  build({ graph, config, auth, consentScopes }: ToolDeps): ToolDefinition[] {
     const scopes = genericScopes(config);
     const canWrite = config.allowGenericWrite && !config.readOnly;
 
+    // Sign-in, in the two tools it has to be.
+    //
+    // There was no way to authenticate from inside a conversation until now:
+    // `login` is a CLI subcommand, so anyone who installed this as a plugin had
+    // to find a terminal before the server could do anything at all. The browser
+    // flow genuinely cannot run here — the transport owns stdio — but the device
+    // authorization grant never needed stdio, and leaving it out was an
+    // oversight rather than a constraint.
+    //
+    // Two tools rather than one because a single blocking call would sit for the
+    // minutes a person takes to finish and hit the client's timeout first.
+    const authTools: ToolDefinition[] = [
+      {
+        name: 'auth_begin_login',
+        title: 'Start signing in to Microsoft 365',
+        // Not a write. --read-only exists to stop this server changing anything
+        // in the tenant, and signing in changes nothing there; a read-only
+        // install that could never authenticate would just be broken.
+        description:
+          'Starts signing the user in to Microsoft 365 and returns a short code with the URL to ' +
+          'enter it at. Show them both, verbatim, and tell them the code is typed into the page ' +
+          'rather than pasted into this conversation. Then call auth_login_status to see whether ' +
+          'they finished — this tool returns as soon as there is a code, not when the sign-in is ' +
+          'done. Calling it again while a code is still valid returns the SAME code rather than ' +
+          'invalidating the one they are using. Use it when any tool reports that there is no ' +
+          'session; it is the only way to sign in from here, because the browser flow needs a ' +
+          'terminal this server does not have. Consent is asked for the scopes the enabled tool ' +
+          'groups need, so a narrower --groups means a smaller prompt. No token is ever returned.',
+        inputSchema: z.object({}),
+        scopes: [],
+        group: GROUP.name,
+        handler: async () => {
+          // The same set the CLI `login` asks for, not the group scopes alone.
+          const wanted = consentScopes();
+          const prompt = await auth.beginDeviceLogin(wanted);
+          return {
+            userCode: prompt.userCode,
+            verificationUri: prompt.verificationUri,
+            expiresAt: prompt.expiresAt,
+            nextStep:
+              'Tell the user to open the URL and enter the code, then call auth_login_status. ' +
+              `Wait at least ${prompt.pollIntervalSeconds} seconds between checks.`,
+            scopesRequested: wanted,
+          };
+        },
+      },
+      {
+        name: 'auth_login_status',
+        title: 'Check the sign-in',
+        description:
+          'Reports where a sign-in started by auth_begin_login has got to: "pending" (the user has ' +
+          'not finished; the code is repeated so you can show it again), "signedIn" (with the ' +
+          'account), "expired" (the code timed out — start another), "failed" (with the reason), or ' +
+          '"none" (no sign-in was started). Never returns a token. Poll it rather than waiting: ' +
+          'this returns immediately either way.',
+        inputSchema: z.object({}),
+        scopes: [],
+        group: GROUP.name,
+        handler: async () => auth.deviceLoginStatus(),
+      },
+    ];
+
     return [
+      ...authTools,
       {
         name: 'graph_request',
         title: 'Call Microsoft Graph directly',

@@ -2,8 +2,8 @@
   "$schema": "https://code.claude.com/schemas/plugin.json",
   "name": "ms-graph-mcp",
   "displayName": "Microsoft Graph MCP",
-  "version": "0.1.0",
-  "description": "Read your own Microsoft 365 \u2014 Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do, Planner \u2014 from Claude Code, through Microsoft Graph with delegated permissions.",
+  "version": "0.1.1",
+  "description": "Read your own Microsoft 365 — Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do, Planner — from Claude Code, through Microsoft Graph with delegated permissions.",
   "author": {
     "name": "devyhan",
     "url": "https://github.com/devyhan"
@@ -43,7 +43,7 @@
       "type": "boolean",
       "title": "Read-only",
       "default": true,
-      "description": "Hide every tool that writes \u2014 no sending mail, no deleting files \u2014 and drop the write scopes from the consent request. Turn this off when you want the server to act, not just read."
+      "description": "Hide every tool that writes — no sending mail, no deleting files — and drop the write scopes from the consent request. Turn this off when you want the server to act, not just read."
     }
   },
   "mcpServers": {

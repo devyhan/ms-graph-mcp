@@ -40,6 +40,47 @@ export interface AuthProvider {
   login(scopes: string[]): Promise<AccountInfo>;
   /** Clears the cached session. */
   logout(): Promise<void>;
+  /**
+   * Starts a device-code sign-in and returns as soon as there is a code to show,
+   * without waiting for the person to use it.
+   *
+   * This is the only sign-in shape that works from inside a tool call. The
+   * browser flow cannot: the MCP transport owns stdio, so there is nowhere to
+   * prompt and nothing may be written to stdout. The device authorization grant
+   * needs no local interaction at all — the code and URL travel back as ordinary
+   * tool output, the person finishes in whatever browser they like, and MSAL
+   * polls the token endpoint in the background.
+   */
+  beginDeviceLogin(scopes: string[]): Promise<DeviceLoginPrompt>;
+  /** Where a sign-in started by `beginDeviceLogin` has got to. Never a token. */
+  deviceLoginStatus(): Promise<DeviceLoginStatus>;
+}
+
+/** What a person needs in order to finish a device-code sign-in. */
+export interface DeviceLoginPrompt {
+  /** The code to type at `verificationUri`. */
+  userCode: string;
+  verificationUri: string;
+  /** When this code stops working, as an ISO-8601 instant. */
+  expiresAt: string;
+  /** Seconds MSAL waits between polls, so a caller can pace its own checks. */
+  pollIntervalSeconds: number;
+}
+
+/**
+ * The state of a device-code sign-in.
+ *
+ * `account` is the signed-in identity, never a token: SECURITY.md puts "the
+ * model must never see one" in scope, and a status field is exactly where one
+ * would leak by accident.
+ */
+export interface DeviceLoginStatus {
+  state: 'none' | 'pending' | 'signedIn' | 'expired' | 'failed';
+  account?: string | undefined;
+  /** Present on `failed`, and on `expired` to say what to do next. */
+  detail?: string | undefined;
+  /** Present while `pending`, so a caller can show the code again. */
+  prompt?: DeviceLoginPrompt | undefined;
 }
 
 /** Raised when a token cannot be acquired without user interaction. */
@@ -208,6 +249,30 @@ export interface ToolDefinition {
 export interface ToolDeps {
   graph: GraphClient;
   config: ServerConfig;
+  /**
+   * Required, not optional. The sign-in tools live in the generic module and are
+   * the only way to authenticate from inside a conversation; if this were
+   * optional, forgetting to pass it would remove them silently and the install
+   * would look fine until someone tried to sign in. That is the bug this field
+   * exists to have fixed, so the type refuses to let it come back. The two CLI
+   * paths that build the catalogue only to read its scopes pass a provider that
+   * throws if anything actually calls it.
+   */
+  auth: AuthProvider;
+  /**
+   * Every scope this configuration will ask consent for, including the extras
+   * individual tools declare beyond their group's meta.
+   *
+   * A function rather than a value because the catalogue is what it is computed
+   * from, and the catalogue is what this object is being passed to build. The
+   * server resolves the cycle by letting the closure read a list it fills in
+   * immediately afterwards; by the time anything calls this, it is complete.
+   *
+   * Required for the same reason `auth` is: the sign-in tool asks for exactly
+   * this set, and a default that quietly asked for less left five tools
+   * permanently returning 403.
+   */
+  consentScopes: () => string[];
 }
 
 /** One domain area of Microsoft 365, e.g. mail or calendar. */
