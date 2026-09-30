@@ -98,8 +98,8 @@ jobs:
           mkdir -p /tmp/consumer && cd /tmp/consumer
           npm init -y >/dev/null
           npm install --silent "$GITHUB_WORKSPACE/$(cat /tmp/tgz)"
-          npx ms-graph-mcp --version
-          npx ms-graph-mcp --help | head -1
+          ./node_modules/.bin/ms-graph-mcp --version
+          ./node_modules/.bin/ms-graph-mcp --help | head -1
 
       # The server speaks MCP before anyone signs in: a client must be able to
       # list tools without credentials. This also guards stdout purity, where a
@@ -109,7 +109,7 @@ jobs:
           cd /tmp/consumer
           META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
           printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{$META}}" \
-            | npx ms-graph-mcp 2>/dev/null \
+            | ./node_modules/.bin/ms-graph-mcp 2>/dev/null \
             | node -e '
               let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
                 const lines=s.trim().split("\n");
