@@ -26,7 +26,7 @@
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json --watch",
     "pretest": "npm run build",
-    "test": "node --test dist/",
+    "test": "node scripts/run-tests.mjs",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run typecheck && npm test",
     "contract": "npm run build && node scripts/graph-contract.mjs"
