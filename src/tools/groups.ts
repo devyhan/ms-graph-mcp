@@ -234,3 +234,54 @@ export function scopesForGroups(names: string[], readOnly: boolean): string[] {
   }
   return [...scopes].sort();
 }
+
+/**
+ * Scopes only a tenant administrator can grant, derived from the catalogue
+ * rather than kept by hand.
+ *
+ * A scope counts as admin-only when every group that carries it is flagged
+ * `requiresAdminConsent`. Subtracting the user-consentable groups matters:
+ * several scopes appear in more than one group, and a scope a plain user can
+ * already grant somewhere else is not something to send anyone to an
+ * administrator for.
+ *
+ * This exists so the server can tell a blocked user the truth. "Run login
+ * again" is wrong advice for a scope no amount of signing in will produce, and
+ * it was the advice this server used to give.
+ */
+/**
+ * Admin-consent scopes that deliberately live on one tool instead of in a
+ * group's meta, where the derivation below cannot see them.
+ *
+ * `TeamMember.Read.All` is declared only by the roster tool in
+ * `src/tools/teams.ts`, so that enabling the Teams group does not ask every
+ * user to consent to reading membership. That is a good reason and the list
+ * stays; what keeps it honest is the test that fails if a tool in an
+ * admin-flagged group ever declares a scope missing from here.
+ */
+const TOOL_ONLY_ADMIN_SCOPES = ['TeamMember.Read.All'];
+
+export const ADMIN_CONSENT_SCOPES: ReadonlySet<string> = (() => {
+  const admin = new Set<string>(TOOL_ONLY_ADMIN_SCOPES);
+  const user = new Set<string>();
+  for (const meta of Object.values(GROUPS)) {
+    const target = meta.requiresAdminConsent ? admin : user;
+    for (const scope of [...meta.readScopes, ...meta.writeScopes]) target.add(scope);
+  }
+  for (const scope of user) admin.delete(scope);
+  return admin;
+})();
+
+/**
+ * The group a caller would enable to get a scope requested at login, preferring
+ * one that needs no administrator when a scope appears in several.
+ */
+export function groupOwningScope(scope: string): string | undefined {
+  let fallback: string | undefined;
+  for (const meta of Object.values(GROUPS)) {
+    if (![...meta.readScopes, ...meta.writeScopes].includes(scope)) continue;
+    if (!meta.requiresAdminConsent) return meta.name;
+    fallback ??= meta.name;
+  }
+  return fallback;
+}

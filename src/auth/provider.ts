@@ -20,6 +20,7 @@ import type {
   SilentFlowRequest,
 } from '@azure/msal-node';
 import type { AccountInfo, AuthFlow, AuthProvider, ServerConfig } from '../contracts.js';
+import { ADMIN_CONSENT_SCOPES, groupOwningScope } from '../tools/groups.js';
 import { InteractionRequiredError } from '../contracts.js';
 import { clearCache, createCachePlugin } from './token-cache.js';
 
@@ -153,12 +154,37 @@ function redirectUriFor(authPort: number): string {
   return authPort > 0 ? `http://localhost:${authPort}` : 'http://localhost';
 }
 
+/** Scopes in `scopes` that no amount of signing in will produce. */
+function adminOnly(scopes: readonly string[]): string[] {
+  return scopes.filter((scope) => ADMIN_CONSENT_SCOPES.has(scope));
+}
+
+/**
+ * What a blocked caller reads.
+ *
+ * The important branch is the admin one. Telling someone to sign in again for a
+ * scope their tenant reserves to an administrator sends them round a loop that
+ * cannot terminate, and this server used to do exactly that — a chat search
+ * failed for a missing `ChannelMessage.Read.All` and the advice was "run
+ * login", which changed nothing however many times it was followed.
+ */
 function signInRequiredMessage(scopes: string[], detail?: string): string {
-  const parts = [
-    'No usable Microsoft 365 session.',
-    'Run the server\'s `login` command in a terminal (for example `npx ms-graph-mcp login`), complete the sign-in, then retry.',
-    `Scopes requested: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}.`,
-  ];
+  const admin = adminOnly(scopes);
+  const parts = ['No usable Microsoft 365 session.'];
+
+  if (admin.length > 0) {
+    const owners = [...new Set(admin.map((scope) => groupOwningScope(scope)).filter(Boolean))];
+    parts.push(
+      `Signing in again will NOT fix this: ${admin.join(', ')} ${admin.length === 1 ? 'is a scope' : 'are scopes'} only a Microsoft 365 tenant administrator can consent to for this application.`,
+      `Ask an administrator to grant ${admin.join(' ')} to this application, then run the \`login\` command again with \`--org-mode\` and the owning tool ${owners.length === 1 ? 'group' : 'groups'} enabled (${owners.join(', ')}).`,
+    );
+  } else {
+    parts.push(
+      "Run the server's `login` command in a terminal (for example `npx ms-graph-mcp login`), complete the sign-in, then retry.",
+    );
+  }
+
+  parts.push(`Scopes requested: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}.`);
   if (detail) parts.push(`Underlying error: ${detail}`);
   return parts.join(' ');
 }
@@ -707,7 +733,7 @@ export function createAuthProvider(opts: {
         // Deliberately no interactive fallback: the MCP transport owns stdio and
         // a browser or prompt opened mid-request would corrupt the JSON-RPC
         // stream. The caller must run `login` out of band.
-        throw new InteractionRequiredError(signInRequiredMessage(scopes));
+        throw new InteractionRequiredError(signInRequiredMessage(scopes), adminOnly(scopes));
       }
 
       try {
@@ -723,7 +749,10 @@ export function createAuthProvider(opts: {
         // Expired or revoked refresh token, a new scope needing consent, or a
         // conditional-access challenge all land here and all need interaction.
         cachedAccount = null;
-        throw new InteractionRequiredError(signInRequiredMessage(scopes, describeError(err)));
+        throw new InteractionRequiredError(
+          signInRequiredMessage(scopes, describeError(err)),
+          adminOnly(scopes),
+        );
       }
     },
 

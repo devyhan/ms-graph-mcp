@@ -22,7 +22,46 @@ import {
   unsubstitutedPlaceholder,
   resolveClientId,
 } from './config.js';
-import { DEFAULT_GROUPS, GROUPS, GROUP_NAMES, scopesForGroups } from './tools/groups.js';
+import type { GraphClient, GraphResponse, ServerConfig } from './contracts.js';
+import { collectTools } from './server.js';
+import {
+  ADMIN_CONSENT_SCOPES,
+  DEFAULT_GROUPS,
+  GROUPS,
+  GROUP_NAMES,
+  scopesForGroups,
+} from './tools/groups.js';
+
+/** Tools are built to read their declared scopes; none of them is called. */
+function inertGraph(): GraphClient {
+  const refuse = async (): Promise<never> => {
+    throw new Error('the scope catalogue tests never reach Graph');
+  };
+  return {
+    request: refuse as unknown as GraphClient['request'],
+    batch: refuse as unknown as GraphClient['batch'],
+    follow: refuse as unknown as GraphClient['follow'],
+  };
+}
+
+const baseConfig: ServerConfig = {
+  clientId: '00000000-0000-0000-0000-000000000000',
+  tenantId: 'common',
+  authority: 'https://login.microsoftonline.com/common',
+  graphHost: 'graph.microsoft.com',
+  groups: ['me'],
+  readOnly: false,
+  graphVersion: 'v1.0',
+  allowBeta: false,
+  discovery: false,
+  orgMode: false,
+  maxOutputChars: 60_000,
+  verbose: false,
+  cacheDir: '/nonexistent',
+  authFlow: 'auto',
+  authPort: 0,
+  allowGenericWrite: false,
+};
 
 const NO_ENV: NodeJS.ProcessEnv = {};
 
@@ -479,4 +518,43 @@ test('unsubstitutedPlaceholder matches only a whole ${...} token', () => {
   assert.equal(unsubstitutedPlaceholder('${FOO'), null);
   assert.equal(unsubstitutedPlaceholder('prefix-${FOO}'), null);
   assert.equal(unsubstitutedPlaceholder(''), null);
+});
+
+/**
+ * The admin-consent scope set is derived from the group catalogue, and a tool
+ * may declare a scope its group's meta does not list. When that happens inside
+ * an admin-flagged group the derivation silently under-reports, and the server
+ * goes back to telling a blocked user to "sign in again" for a permission no
+ * sign-in can produce. This is the check that stops the drift.
+ */
+test('every scope a tool in an admin-consent group needs is marked as such', () => {
+  const config: ServerConfig = {
+    ...baseConfig,
+    groups: GROUP_NAMES.filter((name) => GROUPS[name]?.requiresAdminConsent === true),
+    orgMode: true,
+    readOnly: false,
+  };
+  const tools = collectTools({ graph: inertGraph(), config });
+  const alwaysRequested = new Set(['User.Read', 'offline_access']);
+
+  const missed: string[] = [];
+  for (const tool of tools) {
+    if (GROUPS[tool.group]?.requiresAdminConsent !== true) continue;
+    for (const scope of tool.scopes) {
+      if (alwaysRequested.has(scope)) continue;
+      if (!ADMIN_CONSENT_SCOPES.has(scope)) missed.push(`${tool.name} needs ${scope}`);
+    }
+  }
+  assert.deepEqual(missed, [], 'add these to the catalogue or to TOOL_ONLY_ADMIN_SCOPES');
+});
+
+test('a scope a plain user can consent to somewhere is not marked admin-only', () => {
+  // Several scopes appear in more than one group. Sending someone to an
+  // administrator for one they could already grant themselves wastes the ask.
+  for (const scope of ['Mail.Read', 'Chat.Read', 'Sites.Read.All', 'Files.Read']) {
+    assert.ok(!ADMIN_CONSENT_SCOPES.has(scope), `${scope} is user-consentable`);
+  }
+  for (const scope of ['ChannelMessage.Read.All', 'User.Read.All', 'TeamMember.Read.All']) {
+    assert.ok(ADMIN_CONSENT_SCOPES.has(scope), `${scope} needs an administrator`);
+  }
 });

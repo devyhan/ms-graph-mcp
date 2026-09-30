@@ -19,18 +19,26 @@ export interface SerializedResult {
  * objects with throwing getters.
  */
 function stringifySafe(value: unknown): string {
-  const seen = new WeakSet<object>();
+  // Ancestors, not everything seen. A `WeakSet` of every visited object also
+  // catches the same object appearing twice in DIFFERENT branches, which is not
+  // a cycle and is perfectly ordinary — one array exposed under two field names,
+  // one recipient object listed twice. Marking that `[Circular]` puts a lie
+  // where the data was, and the caller cannot tell it happened.
+  const ancestors: object[] = [];
   try {
     const json = JSON.stringify(
       value,
-      (_key, inner: unknown) => {
+      function (this: unknown, _key: string, inner: unknown): unknown {
         if (typeof inner === 'bigint') return inner.toString();
         if (inner instanceof Error) {
           return { name: inner.name, message: inner.message };
         }
         if (typeof inner === 'object' && inner !== null) {
-          if (seen.has(inner)) return '[Circular]';
-          seen.add(inner);
+          // `this` is the object currently being serialised, so unwinding to it
+          // leaves exactly the chain from the root to this value.
+          while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+          if (ancestors.includes(inner)) return '[Circular]';
+          ancestors.push(inner);
         }
         return inner;
       },

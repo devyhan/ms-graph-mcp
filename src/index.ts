@@ -25,7 +25,7 @@ import {
 } from './config.js';
 import { createGraphClient } from './graph/client.js';
 import { collectTools, createServerFactory } from './server.js';
-import { GROUPS, scopesForGroups } from './tools/groups.js';
+import { ADMIN_CONSENT_SCOPES, GROUPS, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
 
 /** Scopes every session asks for regardless of which groups are enabled. */
@@ -285,15 +285,48 @@ function runPermissions(config: ServerConfig): number {
     if (group.name === 'generic' || group.scopes.length === 0) continue;
     const flag = group.adminConsent ? '  [TENANT ADMIN CONSENT REQUIRED]' : '';
     out(`\n${group.name} — ${group.title}${flag}\n`);
-    for (const scope of group.scopes) out(`  ${scope}\n`);
+    // Marked per scope, not only per group. A group can be user-consentable
+    // overall and still carry one scope an administrator has to grant, and the
+    // group-level flag alone sends people to argue about the wrong permission.
+    for (const scope of group.scopes) {
+      out(`  ${scope}${ADMIN_CONSENT_SCOPES.has(scope) ? '   [admin]' : ''}\n`);
+    }
   }
 
   out('\ngeneric — Generic Graph access\n');
   out('  (no scopes of its own: graph_request reuses the union of the scopes above)\n');
 
   const all = consentScopes(config, tools);
-  out(`\nAll ${all.length} scopes, for an admin consent request:\n`);
+  const admin = all.filter((scope) => ADMIN_CONSENT_SCOPES.has(scope));
+
+  out(`\nAll ${all.length} scopes this configuration requests:\n`);
   out(`${all.join(' ')}\n`);
+
+  if (admin.length === 0) {
+    out('\nNone of these needs a tenant administrator: a signed-in user can consent to all of them.\n');
+    return 0;
+  }
+
+  // The thing an administrator actually has to be sent. Everything else in this
+  // output is for the person running the server; this paragraph is for the
+  // person who can unblock them.
+  // "in a group that requires" rather than "requires": Microsoft classifies a
+  // few of these as user-consentable on their own (Team.ReadBasic.All and
+  // Channel.ReadBasic.All among them). They still reach the user inside one
+  // consent prompt with scopes that are not, and a prompt fails as a whole, so
+  // the administrator has to approve the set either way.
+  out(`\n${admin.length} of them sit in tool groups that need tenant administrator consent.\n`);
+  out('Microsoft marks a few of these user-consentable on their own, but they arrive in the\n');
+  out('same consent prompt as ones that are not, and a prompt is approved or refused whole.\n');
+  out('\nSend this:\n\n');
+  out('  Please grant admin consent for the Entra application\n');
+  out(`    ${config.clientId === '' ? '<your client id>' : config.clientId}\n`);
+  out(`  in tenant ${config.tenantId}, for these delegated Microsoft Graph permissions:\n`);
+  out(`    ${admin.join(' ')}\n`);
+  out('  Entra admin center → Identity → Applications → App registrations → the app\n');
+  out('  → API permissions → Grant admin consent.\n');
+  out('\nUntil that is done, signing in again will not obtain them, and the tools that\n');
+  out('need them fail with a message saying so.\n');
   return 0;
 }
 

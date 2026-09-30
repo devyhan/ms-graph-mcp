@@ -14,6 +14,12 @@ import type { ToolDefinition, ToolDeps, ToolModule } from '../contracts.js';
 import { GROUPS } from './groups.js';
 import { extractCollection } from '../graph/client.js';
 import { buildQuery, escapeODataString, isoDate, quoteSearch } from '../util/odata.js';
+import {
+  foldRepeatedBlocks,
+  foldTrackingLinks,
+  normalizeBodyText,
+  shareBudget,
+} from '../util/thread.js';
 import { stripHtml, truncateText } from '../util/truncate.js';
 
 const GROUP = GROUPS['mail']!;
@@ -124,6 +130,13 @@ const selectArg = z
   .min(1)
   .max(30);
 
+/**
+ * `webLink` is deliberately absent. An Outlook webLink is the message id again,
+ * URL-encoded and wrapped in an owa query — measured at 23.7% of a search
+ * response, on top of the 15.1% the raw id already costs, for a field almost no
+ * caller reads. It comes back on request via `includeWebLink`, or by naming it
+ * in `select`.
+ */
 const DEFAULT_MESSAGE_SELECT = [
   'id',
   'subject',
@@ -133,11 +146,22 @@ const DEFAULT_MESSAGE_SELECT = [
   'isRead',
   'hasAttachments',
   'bodyPreview',
-  'webLink',
 ];
 
-/** Properties `summarizeMessage` already emits, so `select` extras never duplicate them. */
-const SUMMARY_FIELDS = new Set([...DEFAULT_MESSAGE_SELECT, 'sender']);
+/**
+ * Properties `summarizeMessage` already emits, so `select` extras never
+ * duplicate them. `webLink` is listed even though it left the default set: when
+ * a caller does ask for it, `summarizeMessage` is the one that emits it.
+ */
+const SUMMARY_FIELDS = new Set([...DEFAULT_MESSAGE_SELECT, 'sender', 'webLink']);
+
+/**
+ * How far `mail_fetch_thread` will page a conversation before it stops and says
+ * so. Two pages covers every thread anyone summarises; past that the subset
+ * Exchange returns is its choice rather than ours, which `reason` reports.
+ */
+const THREAD_PAGE_SIZE = 50;
+const THREAD_MAX_PAGES = 2;
 
 const DETAIL_SELECT = [
   'id',
@@ -206,6 +230,7 @@ function copyExtras(
 function summarizeMessage(
   message: GraphMessage,
   extras: readonly string[],
+  withWebLink: boolean,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {
     id: message.id ?? undefined,
@@ -217,8 +242,8 @@ function summarizeMessage(
     hasAttachments: message.hasAttachments ?? undefined,
     // Graph caps bodyPreview at 255 characters, so it needs no truncation.
     bodyPreview: message.bodyPreview ?? undefined,
-    webLink: message.webLink ?? undefined,
   };
+  if (withWebLink) out['webLink'] = message.webLink ?? undefined;
   copyExtras(message, extras, out);
   return out;
 }
@@ -319,6 +344,15 @@ const listMessagesInput = z.object({
         '["subject","importance","conversationId"]. id is always included. Do not ask ' +
         'for "body" here — use mail_get_message.',
     ),
+  includeWebLink: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include each row\'s Outlook webLink. Off by default: a webLink is the message id all ' +
+        'over again, URL-encoded, and on a 50-row page it costs more than every subject and ' +
+        'preview put together. Turn it on only when you need a link a person will click — to ' +
+        'read or act on a message, pass its `id` to another mail tool instead.',
+    ),
   unreadOnly: z
     .boolean()
     .default(false)
@@ -364,6 +398,15 @@ const searchMessagesInput = z.object({
         'ends at 23:59:59Z that day. Supplying this switches the tool to $filter mode.',
     ),
   hasAttachments: z.boolean().optional().describe('Only messages with (or without) attachments.'),
+  includeWebLink: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include each row\'s Outlook webLink. Off by default: a webLink is the message id all ' +
+        'over again, URL-encoded, and on a 50-row page it costs more than every subject and ' +
+        'preview put together. Turn it on only when you need a link a person will click — to ' +
+        'read or act on a message, pass its `id` to another mail tool instead.',
+    ),
 });
 
 const getMessageInput = z.object({
@@ -388,6 +431,93 @@ const getMessageInput = z.object({
       'Character budget for the body. Defaults to 8000, which covers most messages. The ' +
         "server's own output cap still applies on top of this.",
     ),
+  foldLinks: z
+    .boolean()
+    .default(true)
+    .describe(
+      'Replace click-tracking URLs — those over 200 characters — with a marker naming the ' +
+        'host and the original length. On a notification mail those redirectors are most of ' +
+        'the body and none of the meaning; ordinary links of any normal length are returned ' +
+        'untouched. Set false only if you need a tracking URL verbatim.',
+    ),
+});
+
+/**
+ * Deliberately not a `.refine()` one-of check. The error a caller sees from a
+ * thrown Error in the handler names both parameters and what to do; a zod issue
+ * on the object root reads as a schema violation with no path.
+ */
+const fetchThreadInput = z.object({
+  fromMessageId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Any message id from the thread you want — typically one a search returned. The server ' +
+        'reads its conversationId and fetches the rest, so you never have to hold a ' +
+        'conversationId yourself. Pass this OR ids, not both.',
+    ),
+  ids: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(50)
+    .optional()
+    .describe(
+      'Explicit message ids, 1-50, fetched in one $batch. Use this to fold across messages ' +
+        'that are NOT one conversation — notification mail from one service shares a footer ' +
+        'but not a conversationId. Order does not matter: the result is always sorted ' +
+        'oldest-first before folding, so the same ids in any order return the same bytes. ' +
+        'Ids that fail are listed in meta.missing rather than failing the call.',
+    ),
+  maxMessages: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .default(20)
+    .describe(
+      'fromMessageId mode only. How many messages of the conversation to return, newest-first ' +
+        'from the mailbox and then re-sorted oldest-first. Defaults to 20. There is no cursor: ' +
+        'a pointer in page 2 could not name a message in page 1, so a longer thread is reported ' +
+        'with reason:"maxMessages" and narrowed with ids instead.',
+    ),
+  maxBodyChars: z
+    .number()
+    .int()
+    .min(200)
+    .max(20000)
+    .optional()
+    .describe(
+      'Optional hard ceiling on any single message body, applied AFTER folding. There is no ' +
+        'default on purpose: the one message in a chain that matters is often the long one, and ' +
+        'a per-message cap cuts exactly that. Leave it unset and let totalBodyChars bind, which ' +
+        'shares the budget fairly instead of clipping every message to the same length.',
+    ),
+  totalBodyChars: z
+    .number()
+    .int()
+    .min(1000)
+    .max(120000)
+    .default(30000)
+    .describe(
+      'Ceiling on all bodies in this response together, default 30000 and clamped to the ' +
+        "server's own output cap. This is the limit that actually binds — raise it, not " +
+        'maxBodyChars, when you want more text. Budget is shared fairly: a short message is ' +
+        'never truncated to make room for a long one.',
+    ),
+  fold: z
+    .enum(['pointers', 'off'])
+    .default('pointers')
+    .describe(
+      'How to handle text that repeats across the returned messages. "pointers" (the default) ' +
+        'replaces a repeat with a marker naming the message that carried it first, such as ' +
+        '[quoted from #3]. "off" returns every message whole and is typically four times ' +
+        'larger; use it only if you must read a quoted copy verbatim.',
+    ),
+  foldLinks: z
+    .boolean()
+    .default(true)
+    .describe('As in mail_get_message: replace click-tracking URLs over 200 characters.'),
 });
 
 const listFoldersInput = z.object({
@@ -500,7 +630,10 @@ export const mailModule: ToolModule = {
         description:
           'Lists Outlook messages newest-first, 10 per call by default (50 max), as a compact ' +
           'projection: id, subject, from, toRecipients, receivedDateTime, isRead, ' +
-          'hasAttachments, bodyPreview and webLink. Bodies are never included — bodyPreview is ' +
+          'hasAttachments and bodyPreview. The Outlook webLink is NOT included — it is the id ' +
+          'again, URL-encoded, and costs more than everything else on the row; pass ' +
+          'includeWebLink when you need a clickable link, and use the `id` for any further ' +
+          'mail tool call. Bodies are never included — bodyPreview is ' +
           "Graph's first 255 characters, and mail_get_message returns the rest. Page with " +
           '`skip`. Note that Exchange rejects some filter/orderby combinations with ' +
           '"The restriction or sort order is too complex"; when that happens, drop `orderby` ' +
@@ -509,8 +642,10 @@ export const mailModule: ToolModule = {
         scopes: READ_SCOPES,
         group: GROUP.name,
         handler: async (args) => {
-          const { folderId, top, skip, filter, orderby, select, unreadOnly } =
+          const { folderId, top, skip, filter, orderby, select, unreadOnly, includeWebLink } =
             listMessagesInput.parse(args);
+          // A caller who names webLink in `select` meant it, whatever the flag says.
+          const wantsWebLink = includeWebLink || (select?.includes('webLink') ?? false);
 
           // Message ids and well-known folder names are safe characters, but a
           // folder id is caller-supplied and lands in a path segment.
@@ -524,7 +659,13 @@ export const mailModule: ToolModule = {
           // Parenthesised so a caller's `a or b` cannot swallow the unread clause.
           if (filter !== undefined) clauses.push(`(${filter})`);
 
-          const fields = [...new Set(['id', ...(select ?? DEFAULT_MESSAGE_SELECT)])];
+          const fields = [
+            ...new Set([
+              'id',
+              ...(select ?? DEFAULT_MESSAGE_SELECT),
+              ...(wantsWebLink ? ['webLink'] : []),
+            ]),
+          ];
 
           const res = await graph.request({
             path,
@@ -544,7 +685,7 @@ export const mailModule: ToolModule = {
 
           return {
             count: messages.length,
-            messages: messages.map((message) => summarizeMessage(message, extras)),
+            messages: messages.map((message) => summarizeMessage(message, extras, wantsWebLink)),
             nextLink: res.nextLink,
           };
         },
@@ -566,10 +707,10 @@ export const mailModule: ToolModule = {
         scopes: READ_SCOPES,
         group: GROUP.name,
         handler: async (args) => {
-          const { query, top, from, to, after, before, hasAttachments } =
+          const { query, top, from, to, after, before, hasAttachments, includeWebLink } =
             searchMessagesInput.parse(args);
 
-          const fields = [...DEFAULT_MESSAGE_SELECT];
+          const fields = [...DEFAULT_MESSAGE_SELECT, ...(includeWebLink ? ['webLink'] : [])];
           const extras: string[] = [];
           const dateBounded = after !== undefined || before !== undefined;
 
@@ -611,7 +752,7 @@ export const mailModule: ToolModule = {
               mode: 'filter',
               matchedOn: 'subject substring, because a date range was given',
               count: messages.length,
-              messages: messages.map((message) => summarizeMessage(message, extras)),
+              messages: messages.map((message) => summarizeMessage(message, extras, includeWebLink)),
               nextLink: res.nextLink,
             };
           }
@@ -639,7 +780,7 @@ export const mailModule: ToolModule = {
             mode: 'search',
             matchedOn: 'full-text KQL, ranked by relevance rather than date',
             count: messages.length,
-            messages: messages.map((message) => summarizeMessage(message, extras)),
+            messages: messages.map((message) => summarizeMessage(message, extras, includeWebLink)),
             nextLink: res.nextLink,
           };
         },
@@ -653,12 +794,20 @@ export const mailModule: ToolModule = {
           'capped at 8000 characters; raise maxBodyChars for a long thread, or pass ' +
           'format:"preview" to skip the body when you only need to identify the message. ' +
           'Attachment contents are never included — use mail_list_attachments. Reading a ' +
-          'message here does not mark it read; use mail_mark_read for that.',
+          'message here does not mark it read; use mail_mark_read for that. ' +
+          'DO NOT loop this over a reply chain: each message quotes the ones before it, so ' +
+          'reading a thread one call at a time returns the same text again and again — on a ' +
+          'measured 24-message thread that was 381,000 characters, four times what the same ' +
+          'content costs through mail_fetch_thread, which folds the repeats. Use this tool for ' +
+          'a single message, and mail_fetch_thread for two or more of one conversation. ' +
+          '`bodyRendering` says where the text came from: "exchange-text" is Exchange\'s own ' +
+          'conversion, "stripped-html" means the tags were removed locally and every link went ' +
+          'with them (`linksLost` counts how many), "html" is raw markup.',
         inputSchema: getMessageInput,
         scopes: READ_SCOPES,
         group: GROUP.name,
         handler: async (args) => {
-          const { id, format, maxBodyChars } = getMessageInput.parse(args);
+          const { id, format, maxBodyChars, foldLinks } = getMessageInput.parse(args);
           const wantsBody = format !== 'preview';
 
           // Message ids are base64-ish and contain '/', '+' and '=' — every one
@@ -680,11 +829,38 @@ export const mailModule: ToolModule = {
 
           let body: string | undefined;
           let bodyChars: number | undefined;
+          let bodyRendering: string | undefined;
+          let foldedLinks: number | undefined;
+          let linksLost: number | undefined;
           if (wantsBody) {
             const raw = message.body?.content ?? '';
             // The Prefer header is advisory; some mailboxes return HTML anyway.
             const stillHtml = (message.body?.contentType ?? '').toLowerCase() === 'html';
-            const text = format === 'html' || !stillHtml ? raw : stripHtml(raw);
+            let text = format === 'html' || !stillHtml ? raw : stripHtml(raw);
+
+            // Which of three renderings produced this text, because they are not
+            // interchangeable and the difference is otherwise invisible. Exchange's
+            // own conversion writes an address as `x <mailto:x>` and leaves URLs as
+            // text; the local stripHtml fallback discards every href along with the
+            // tag, so a link cited in an HTML-only message cannot be recovered from
+            // this tool at all. Saying so beats letting a caller assume otherwise.
+            bodyRendering = format === 'html' ? 'html' : stillHtml ? 'stripped-html' : 'exchange-text';
+            if (bodyRendering === 'stripped-html') {
+              const lost = (raw.match(/https?:\/\//g) ?? []).length;
+              if (lost > 0) linksLost = lost;
+            }
+
+            // Skipped for format:"html" on purpose: folding a URL inside an href
+            // would corrupt the markup the caller asked for verbatim.
+            if (format !== 'html') {
+              text = normalizeBodyText(text).text;
+              if (foldLinks) {
+                const folded = foldTrackingLinks(text);
+                text = folded.text;
+                if (folded.folded > 0) foldedLinks = folded.folded;
+              }
+            }
+
             bodyChars = text.length;
             body = truncateText(text, budget);
           }
@@ -705,9 +881,300 @@ export const mailModule: ToolModule = {
             parentFolderId: message.parentFolderId ?? undefined,
             webLink: message.webLink ?? undefined,
             bodyFormat: format,
+            bodyRendering,
             bodyPreview: wantsBody ? undefined : (message.bodyPreview ?? undefined),
             body,
             bodyTruncated: bodyChars !== undefined && bodyChars > budget ? true : undefined,
+            foldedLinks,
+            linksLost,
+          };
+        },
+      },
+      {
+        name: 'mail_fetch_thread',
+        title: 'Fetch a mail thread',
+        description:
+          'Reads a whole reply chain in one call and folds away the text the messages repeat ' +
+          'at each other. Use it instead of looping mail_get_message whenever you want two or ' +
+          'more messages of one conversation — summarising a thread, finding when something ' +
+          'was decided, reconstructing who asked what. Pass `fromMessageId` (any message id ' +
+          'from the thread, and the server finds the rest) or `ids` (an explicit list, which ' +
+          'also works across conversations). Messages come back oldest-first as `messages`, ' +
+          'each with an `n` you can cite. Where a message quotes text an earlier one already ' +
+          'carried, the quote is replaced by a marker like [quoted from #3] or [quoted from ' +
+          '#2-#5]; every index named is a message in this same response and always lower than ' +
+          'the one citing it, so nothing points outside what you were given. On a measured ' +
+          '24-message Outlook thread this returned 92,000 characters where 24 separate ' +
+          'mail_get_message calls returned 381,000, with no unique sentence lost. ' +
+          'Read `meta.fold` to see how much was folded and `meta.budget` to see whether bodies ' +
+          'were cut. `reason` is "complete" when you have the whole conversation, "maxMessages" ' +
+          'when only the newest `maxMessages` of a longer thread came back, and "maxPages" when ' +
+          'the conversation is longer than this tool will page — there is no cursor, because a ' +
+          'pointer on page 2 could not name a message on page 1, so narrow with ' +
+          'mail_search_messages and pass `ids` instead. A message tagged ' +
+          '`bodyRendering:"stripped-html"` reached us as HTML and lost every link on the way ' +
+          'through the tag stripper; `linksLost` counts them. Nothing here is marked read, and ' +
+          'attachment contents are never included.',
+        inputSchema: fetchThreadInput,
+        scopes: READ_SCOPES,
+        group: GROUP.name,
+        handler: async (args) => {
+          const { fromMessageId, ids, maxMessages, maxBodyChars, totalBodyChars, fold, foldLinks } =
+            fetchThreadInput.parse(args);
+
+          if ((fromMessageId === undefined) === (ids === undefined)) {
+            throw new Error(
+              'mail_fetch_thread needs exactly one of `fromMessageId` (any message id from the ' +
+                'thread, and the server finds the rest) or `ids` (an explicit list of message ' +
+                'ids). You passed ' +
+                (ids === undefined ? 'neither' : 'both') +
+                '.',
+            );
+          }
+
+          // Exchange's own text conversion, not the local stripHtml fallback:
+          // stripHtml discards every href with its tag, which would delete the
+          // links a thread summary most often needs to cite.
+          const prefer = { Prefer: 'outlook.body-content-type="text"' };
+          const select = [...DETAIL_SELECT, 'body'];
+
+          let collected: GraphMessage[] = [];
+          let missing: Array<{ id: string; status: number }> | undefined;
+          let conversationId: string | undefined;
+          let reason: 'complete' | 'maxMessages' | 'maxPages' = 'complete';
+
+          if (ids !== undefined) {
+            const query = new URLSearchParams({ $select: select.join(',') }).toString();
+            const responses = await graph.batch(
+              ids.map((id, index) => ({
+                id: String(index),
+                method: 'GET' as const,
+                url: `/me/messages/${encodeURIComponent(id)}?${query}`,
+                headers: prefer,
+              })),
+              READ_SCOPES,
+            );
+
+            const failures: Array<{ id: string; status: number }> = [];
+            for (const response of responses) {
+              const requested = ids[Number(response.id)];
+              if (response.status >= 200 && response.status < 300) {
+                collected.push((response.body ?? {}) as GraphMessage);
+              } else if (requested !== undefined) {
+                // One unreadable id must not lose the other 49.
+                failures.push({ id: requested, status: response.status });
+              }
+            }
+            if (failures.length > 0) missing = failures;
+          } else {
+            const seed = await graph.request<GraphMessage>({
+              path: `/me/messages/${encodeURIComponent(fromMessageId as string)}`,
+              method: 'GET',
+              query: buildQuery({ select: ['id', 'conversationId'] }),
+              scopes: READ_SCOPES,
+            });
+            conversationId = seed.data?.conversationId ?? undefined;
+            if (conversationId === undefined || conversationId === '') {
+              throw new Error(
+                `Message ${JSON.stringify(fromMessageId)} has no conversationId, so its thread ` +
+                  'cannot be resolved. Pass the message ids directly as `ids` instead.',
+              );
+            }
+
+            // No $orderby. Exchange rejects a $filter and an $orderby on different
+            // properties with "The restriction or sort order is too complex", and
+            // conversationId/receivedDateTime is exactly that pair — so the sort
+            // happens below, on the rows themselves.
+            const res = await graph.request({
+              path: '/me/messages',
+              method: 'GET',
+              query: buildQuery({
+                select,
+                filter: `conversationId eq '${escapeODataString(conversationId)}'`,
+                top: THREAD_PAGE_SIZE,
+              }),
+              headers: prefer,
+              maxPages: THREAD_MAX_PAGES,
+              scopes: READ_SCOPES,
+            });
+            collected = extractCollection<GraphMessage>(res.data);
+            // Graph says so itself. Counting rows is not enough: Exchange picks
+            // its own page size and will answer $top=50 with twelve rows and a
+            // live nextLink, which a row count reads as a finished collection.
+            if (res.nextLink !== undefined) reason = 'maxPages';
+          }
+
+          // Oldest-first, because a pointer may only ever aim backwards. The id
+          // tie-break keeps two messages with an identical timestamp in a fixed
+          // order, so the same input cannot produce two different foldings.
+          collected.sort((a, b) => {
+            const left = a.receivedDateTime ?? '';
+            const right = b.receivedDateTime ?? '';
+            if (left !== right) return left < right ? -1 : 1;
+            return (a.id ?? '').localeCompare(b.id ?? '');
+          });
+
+          // Conversation mode only. In ids mode the caller enumerated the set, and
+          // silently dropping the five oldest of twenty-five ids it named — with
+          // nothing in `missing` to say so — would be a lie about what was read.
+          if (ids === undefined && collected.length > maxMessages) {
+            collected = collected.slice(collected.length - maxMessages);
+            if (reason === 'complete') reason = 'maxMessages';
+          }
+
+          let foldedLinks = 0;
+          let strippedHtml = 0;
+          const rendering: Array<{ how: string; linksLost: number | undefined }> = [];
+          const prepared = collected.map((message) => {
+            const raw = message.body?.content ?? '';
+            // The Prefer header asks Exchange to convert; it is advisory, and a
+            // mailbox that ignores it sends HTML that stripHtml flattens here —
+            // discarding every href with its tag. That is a real loss of exactly
+            // the links a thread summary cites, so each message says which
+            // rendering it got and how many links went with it.
+            const stillHtml = (message.body?.contentType ?? '').toLowerCase() === 'html';
+            let lost: number | undefined;
+            if (stillHtml) {
+              strippedHtml += 1;
+              const count = (raw.match(/https?:\/\//g) ?? []).length;
+              if (count > 0) lost = count;
+            }
+            rendering.push({ how: stillHtml ? 'stripped-html' : 'exchange-text', linksLost: lost });
+
+            let text = normalizeBodyText(stillHtml ? stripHtml(raw) : raw).text;
+            if (foldLinks) {
+              const result = foldTrackingLinks(text);
+              text = result.text;
+              foldedLinks += result.folded;
+            }
+            return { body: text };
+          });
+
+          const unfolded = (): ReturnType<typeof foldRepeatedBlocks> => ({
+            bodies: prepared.map((item) => ({
+              body: item.body,
+              quotedChars: 0,
+              pointers: 0,
+              protectedChars: 0,
+            })),
+            stats: { blocks: 0, folded: 0, quotedChars: 0 },
+          });
+
+          let folded = fold === 'pointers' ? foldRepeatedBlocks(prepared) : unfolded();
+
+          // The envelope rides on top of the bodies and is metered by the same
+          // output cap, so the reserve is subtracted before the bodies are given
+          // anything. Without it a full budget serialises past the cap and the
+          // whole result comes back as a character cut instead of JSON.
+          const reserve = collected.length * 400 + 2000;
+          const ceiling = Math.max(1000, config.maxOutputChars - reserve);
+          const allowance = Math.min(totalBodyChars, ceiling);
+          const sizeUp = (): { needs: number[]; grants: number[] } => {
+            const needs = folded.bodies.map((item) =>
+              maxBodyChars === undefined
+                ? item.body.length
+                : Math.min(item.body.length, maxBodyChars),
+            );
+            // Floors keep a pointer's target intact. Without them the fold runs
+            // first and the budget cuts second, so `[quoted from #1]` can survive
+            // while the text it names is trimmed off the end of #1 — a marker
+            // that reads as a reference and is a deletion.
+            const floors = folded.bodies.map((item) => item.protectedChars);
+            return { needs, grants: shareBudget(needs, allowance, floors) };
+          };
+
+          let { needs, grants } = sizeUp();
+          let foldDropped: string | undefined;
+          const dangles = (): boolean =>
+            folded.bodies.some((item, i) => (grants[i] ?? 0) < item.protectedChars);
+
+          if (fold === 'pointers' && dangles()) {
+            // The budget cannot hold every pointer's target. Rather than emit
+            // markers that resolve to nothing, drop the fold for this call: the
+            // result is larger and some bodies are cut, but a cut body says so
+            // and a dangling pointer does not.
+            folded = unfolded();
+            foldDropped = 'budget';
+            ({ needs, grants } = sizeUp());
+          }
+
+          let usedBodyChars = 0;
+          let truncatedMessages = 0;
+          const rootSubject = collected[0]?.subject ?? undefined;
+
+          const messages = collected.map((message, index) => {
+            const item = folded.bodies[index] as { body: string; quotedChars: number; pointers: number; duplicateOf?: number };
+            const grant = grants[index] ?? 0;
+            const body = truncateText(item.body, grant);
+            usedBodyChars += body.length;
+            const cut = item.body.length > grant;
+            if (cut) truncatedMessages += 1;
+
+            const subject = message.subject ?? undefined;
+            return {
+              n: index + 1,
+              id: message.id ?? undefined,
+              receivedDateTime: message.receivedDateTime ?? undefined,
+              from: formatAddress(message.from ?? message.sender),
+              toRecipients: formatAddresses(message.toRecipients),
+              ccRecipients: formatAddresses(message.ccRecipients),
+              // Only when it diverges from the thread subject, which is hoisted.
+              subject: subject === rootSubject ? undefined : subject,
+              hasAttachments: message.hasAttachments === true ? true : undefined,
+              body,
+              bodyChars: body.length,
+              // Only when it is the lossy path; the common case says nothing.
+              bodyRendering:
+                rendering[index]?.how === 'stripped-html' ? 'stripped-html' : undefined,
+              linksLost: rendering[index]?.linksLost,
+              quotedChars: item.quotedChars > 0 ? item.quotedChars : undefined,
+              pointers: item.pointers > 0 ? item.pointers : undefined,
+              duplicateOf: item.duplicateOf,
+              bodyTruncated: cut ? true : undefined,
+            };
+          });
+
+          const participants = [
+            ...new Set(
+              collected.flatMap((message) => [
+                formatAddress(message.from ?? message.sender),
+                ...(formatAddresses(message.toRecipients) ?? []),
+                ...(formatAddresses(message.ccRecipients) ?? []),
+              ]),
+            ),
+          ]
+            .filter((entry): entry is string => entry !== undefined)
+            .sort();
+
+          return {
+            mode: ids === undefined ? 'conversation' : 'ids',
+            conversationId,
+            subject: rootSubject,
+            order: 'oldest-first',
+            count: messages.length,
+            reason,
+            // Everything array-shaped except `messages` lives in here on purpose:
+            // the output serialiser shortens whichever TOP-LEVEL array has the most
+            // elements, and a thread cc'd to thirty people would otherwise have its
+            // participant list chosen over its messages.
+            meta: {
+              fold: {
+                blocks: folded.stats.blocks,
+                folded: folded.stats.folded,
+                quotedChars: folded.stats.quotedChars,
+                links: foldedLinks,
+                // Set when folding was asked for and abandoned: the budget could
+                // not hold the text the pointers would have named.
+                droppedBecause: foldDropped,
+              },
+              budget: { totalBodyChars: Math.min(totalBodyChars, ceiling), usedBodyChars, truncatedMessages },
+              // Loud only when it matters: how many bodies arrived as HTML and
+              // therefore lost their links on the way through stripHtml.
+              strippedHtmlMessages: strippedHtml > 0 ? strippedHtml : undefined,
+              participants,
+              missing,
+            },
+            messages,
           };
         },
       },

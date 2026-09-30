@@ -17,25 +17,58 @@ import { stripHtml, truncateText } from '../util/truncate.js';
 const GROUP: ToolGroupMeta = GROUPS['search']!;
 
 /**
- * All three group read scopes travel with every search call. Microsoft Search
- * federates Exchange, OneDrive and SharePoint behind one endpoint and selects
- * the index from `entityTypes`, and the three scopes are consented together the
- * moment the group is enabled, so narrowing the token per entity type would buy
- * nothing but extra ways to fail.
+ * What each index actually needs, so a call asks for that and nothing else.
+ *
+ * This used to send all three group read scopes with every search, on the
+ * reasoning that enabling the group consents them together anyway. That holds
+ * only where the whole group was granted. `Sites.Read.All` needs an
+ * administrator in most tenants, and a user who could not get one — the user
+ * this server exists for — then found a chatMessage-only search failing on
+ * AADSTS65001 for two scopes it never touches. Measured on one such mailbox:
+ * the failure cost 110,000 characters of chat history fetched and scanned by
+ * hand to answer a question the search would have answered in 900.
+ *
+ * Narrowing is free where everything is consented: a silent token request for a
+ * subset of what was granted succeeds exactly as before.
  */
-const BASE_SCOPES: string[] = [...GROUP.readScopes];
+const ENTITY_SCOPES: Record<EntityType, readonly string[]> = {
+  message: ['Mail.Read'],
+  event: ['Calendars.Read'],
+  driveItem: ['Files.Read', 'Sites.Read.All'],
+  listItem: ['Sites.Read.All'],
+  site: ['Sites.Read.All'],
+  // Graph wants both, and says so itself on a 403: "Access to ChatMessage in
+  // Graph API requires the following permissions: Chat.Read or Chat.ReadWrite,
+  // ChannelMessage.Read.All." Asking for only the first produced a token the
+  // search endpoint then refused, which reads as a permissions problem with no
+  // permission left to fix.
+  chatMessage: ['Chat.Read', 'ChannelMessage.Read.All'],
+};
+
+/** The union of what one bucket's entity types need, in a stable order. */
+function scopesFor(entityTypes: readonly EntityType[]): string[] {
+  const out: string[] = [];
+  for (const type of entityTypes) {
+    for (const scope of ENTITY_SCOPES[type]) if (!out.includes(scope)) out.push(scope);
+  }
+  return out;
+}
 
 /**
- * Two entity types reach indexes the group meta does not cover: Graph refuses
- * `event` without Calendars.Read and `chatMessage` without Chat.Read. Both are
- * user-consentable, and both are added to a call only when the caller actually
- * asks for that entity type, so an ordinary mail search never widens the token.
+ * Declared on the definition, which is what a login asks consent for.
+ *
+ * `ChannelMessage.Read.All` is deliberately excluded even though a chatMessage
+ * search needs it. It is an administrator-consent scope owned by the `teams`
+ * group, and pulling it in here would put every personal install behind an
+ * administrator it does not otherwise need — `search` is in the personal preset.
+ * Searching chat therefore means enabling `teams` too, which is already the gate
+ * for that permission.
  */
-const EVENT_SCOPE = 'Calendars.Read';
-const CHAT_MESSAGE_SCOPE = 'Chat.Read';
+const ADMIN_ONLY_SCOPE = 'ChannelMessage.Read.All';
 
-/** Declared on the definition: the widest set any single invocation can need. */
-const SEARCH_SCOPES: string[] = [...BASE_SCOPES, EVENT_SCOPE, CHAT_MESSAGE_SCOPE];
+const SEARCH_SCOPES: string[] = [...new Set(Object.values(ENTITY_SCOPES).flat())].filter(
+  (scope) => scope !== ADMIN_ONLY_SCOPE,
+);
 
 const SEARCH_PATH = '/search/query';
 
@@ -107,14 +140,13 @@ function splitIntoBuckets(entityTypes: EntityType[]): Bucket[] {
   const buckets: Bucket[] = [];
 
   if (others.length > 0) {
-    const scopes = others.includes('event') ? [...BASE_SCOPES, EVENT_SCOPE] : BASE_SCOPES;
-    buckets.push({ entityTypes: others, scopes, supportsFields: true });
+    buckets.push({ entityTypes: others, scopes: scopesFor(others), supportsFields: true });
   }
 
   if (entityTypes.includes('chatMessage')) {
     buckets.push({
       entityTypes: ['chatMessage'],
-      scopes: [...BASE_SCOPES, CHAT_MESSAGE_SCOPE],
+      scopes: scopesFor(['chatMessage']),
       supportsFields: false,
     });
   }
@@ -298,7 +330,7 @@ export const searchModule: ToolModule = {
         group: GROUP.name,
         scopes: SEARCH_SCOPES,
         description:
-          "Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. Defaults to 10 hits per entity-type group over ['message','driveItem']; page with `from`. Traps: chatMessage cannot be combined with other entity types, so a mixed request is split into two calls and merged, and its hits ignore `fields`; searching driveItem, listItem or site needs Sites.Read.All, event needs Calendars.Read and chatMessage needs Chat.Read, so enable the matching tool group or the split for that type fails on its own while the rest still return; results are ranked, not sorted by date, and freshly changed items may not be indexed yet. This is read-only despite using POST.",
+          "Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. Defaults to 10 hits per entity-type group over ['message','driveItem']; page with `from`. Traps: chatMessage cannot be combined with other entity types, so a mixed request is split into two calls and merged, and its hits ignore `fields`; each split asks only for the scopes its own index needs — Sites.Read.All for driveItem, listItem and site, Mail.Read for message, Calendars.Read for event, and BOTH Chat.Read and ChannelMessage.Read.All for chatMessage. That last pair is the one to watch: ChannelMessage.Read.All needs tenant admin consent and is carried by the `teams` group, so a chat search needs `teams` enabled as well as `chat`, and without it Graph refuses the chatMessage split with a 403 naming both permissions while every other split still returns; results are ranked, not sorted by date, and freshly changed items may not be indexed yet. This is read-only despite using POST.",
         inputSchema: searchQuerySchema,
         handler: async (args) => {
           const { query, entityTypes, from, size, fields } = searchQuerySchema.parse(args);

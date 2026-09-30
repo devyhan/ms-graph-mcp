@@ -45,8 +45,15 @@ export interface AuthProvider {
 /** Raised when a token cannot be acquired without user interaction. */
 export class InteractionRequiredError extends Error {
   override readonly name = 'InteractionRequiredError';
-  constructor(message: string) {
+  /**
+   * Scopes among those requested that only a tenant administrator can grant.
+   * Present when signing in again cannot fix the failure, so the caller can say
+   * so instead of sending the user round a loop that will not terminate.
+   */
+  readonly adminScopes: readonly string[];
+  constructor(message: string, adminScopes: readonly string[] = []) {
     super(message);
+    this.adminScopes = adminScopes;
   }
 }
 

@@ -91,3 +91,47 @@ test('originalChars reports the full size, not the returned size', () => {
   assert.ok(out.originalChars > 6_000);
   assert.ok(out.text.length <= 6_000);
 });
+
+/**
+ * The same object reached twice by different paths is not a cycle. An earlier
+ * version tracked every object it had ever visited, so a payload that exposed
+ * one array under two field names — which `graph_list_permissions` does — put
+ * the literal string "[Circular]" where the second copy of the data should be.
+ * A reader cannot tell that apart from real content.
+ */
+test('a value shared by two fields is serialised twice, not marked circular', () => {
+  const shared = ['ChannelMessage.Read.All', 'Team.ReadBasic.All'];
+  const out = serializeResult({ adminConsentScopes: shared, guidance: { askFor: shared } }, 0);
+  const parsed = JSON.parse(out.text) as {
+    adminConsentScopes: string[];
+    guidance: { askFor: string[] };
+  };
+
+  assert.deepEqual(parsed.adminConsentScopes, shared);
+  assert.deepEqual(parsed.guidance.askFor, shared, 'the second path must carry the data too');
+  assert.ok(!out.text.includes('[Circular]'));
+});
+
+test('the same object repeated in one array survives every time', () => {
+  const person = { name: 'Ada', address: 'ada@example.com' };
+  const parsed = JSON.parse(serializeResult({ to: [person, person, person] }, 0).text) as {
+    to: unknown[];
+  };
+  assert.deepEqual(parsed.to, [person, person, person]);
+});
+
+test('an actual cycle is still cut rather than throwing', () => {
+  const node: Record<string, unknown> = { id: 'a' };
+  node['self'] = node;
+  const text = serializeResult({ node }, 0).text;
+  assert.ok(text.includes('[Circular]'));
+  assert.doesNotThrow(() => JSON.parse(text));
+});
+
+test('a cycle through an array is cut too', () => {
+  const list: unknown[] = [1, 2];
+  list.push(list);
+  const text = serializeResult({ list }, 0).text;
+  assert.ok(text.includes('[Circular]'));
+  assert.doesNotThrow(() => JSON.parse(text));
+});

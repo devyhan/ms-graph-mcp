@@ -301,6 +301,38 @@ npx ms-graph-mcp login --groups me,mail,calendar,files
 
 Entra prompts again only for what you added; what was already granted stays granted. `--read-only` drops every write scope from the request. `npx ms-graph-mcp permissions --preset work` prints the exact scope list for a configuration, formatted for pasting into an admin consent request.
 
+## Search permissions
+
+`search_query` is the cheapest way to find something, because it asks Microsoft's index instead of pulling whole mailboxes and chat rooms through your context. What it can reach depends on one scope per index, and a call asks only for the scopes the entity types in it actually need.
+
+| `entityTypes` | Scopes that call requests | Tenant admin? |
+| --- | --- | --- |
+| `message` | `Mail.Read` | No |
+| `event` | `Calendars.Read` | No |
+| `driveItem` | `Files.Read`, `Sites.Read.All` | No |
+| `listItem`, `site` | `Sites.Read.All` | No |
+| `chatMessage` | `Chat.Read` **and** `ChannelMessage.Read.All` | **Yes** ¹ |
+
+¹ Searching Teams chat is the one that needs an administrator. Graph refuses the `chatMessage` index without `ChannelMessage.Read.All` — it says so itself on a 403 — and that scope needs tenant admin consent. It belongs to the `teams` group, so a chat search needs `teams` enabled alongside `chat`, which means `--org-mode`. It is deliberately **not** in the `search` group's own scope list: `search` is in the personal preset, and putting an admin-consent scope there would put every personal install behind an administrator it does not otherwise need.
+
+Until that consent exists, the chat index is unavailable and finding something in Teams means reading rooms with `chat_fetch_history` instead. On one real mailbox that difference was measured at about 110,000 characters of tool output versus 900 for the same question.
+
+### Getting admin consent
+
+`npx ms-graph-mcp permissions` prints, for your configuration, exactly which scopes need an administrator and a paragraph to send them. Scopes needing consent are marked `[admin]` per scope, not just per group, because a group can be user-consentable overall and still carry one scope that is not.
+
+```
+npx ms-graph-mcp permissions --groups search,chat,teams,me --org-mode
+```
+
+The tools say the same thing at the point of failure. A call blocked by a missing admin scope answers with **"Blocked by missing tenant admin consent — not by a missing sign-in"**, names the scope, and says which group to enable afterwards — rather than telling you to sign in again, which for these scopes changes nothing however many times you do it. `graph_list_permissions` returns the same detail as structured fields (`adminConsentScopes`, `howToGetAdminConsent`) so an assistant can relay it.
+
+Once an administrator has granted the scope, sign in again with the owning group enabled:
+
+```
+npx ms-graph-mcp login --groups search,chat,teams,me --org-mode
+```
+
 ## Register your own Entra application
 
 Once the shared registration ships, most users can skip this section. It remains the supported fallback for the reasons listed in [Which application am I signing in to](#which-application-am-i-signing-in-to), and until then it is the only way to sign in.
@@ -383,7 +415,7 @@ The server sorts these into three kinds, and only one of them falls back.
 
 ## Tools
 
-101 tools across 14 groups. `--read-only` removes every write tool, leaving 64. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
+102 tools across 14 groups. `--read-only` removes every write tool, leaving 71. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
 
 ### Tool groups
 
@@ -392,7 +424,7 @@ Tools are grouped by product area. Enable only the groups you need — the scope
 | Group | Product | Delegated scopes | Admin consent | Tools |
 | --- | --- | --- | --- | --- |
 | `me` | Entra ID profile, Outlook mailbox settings | `User.Read`, `MailboxSettings.Read` | No | 2 |
-| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 12 |
+| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 13 |
 | `calendar` | Outlook calendar | `Calendars.Read`, `Calendars.Read.Shared`, `Calendars.ReadWrite` | No | 9 |
 | `files` | OneDrive | `Files.Read`, `Files.Read.All`, `Files.ReadWrite` | No | 10 |
 | `todo` | Microsoft To Do | `Tasks.Read`, `Tasks.ReadWrite` | No | 8 |
@@ -400,7 +432,7 @@ Tools are grouped by product area. Enable only the groups you need — the scope
 | `contacts` | Outlook contacts | `Contacts.Read`, `Contacts.ReadWrite` | No | 6 |
 | `chat` | Teams one-to-one and group chats | `Chat.Read`, `Chat.ReadWrite` | No | 6 |
 | `sharepoint` | SharePoint sites, libraries, lists | `Sites.Read.All`, `Sites.ReadWrite.All` | No | 11 |
-| `search` | Microsoft Search across mail, files, sites | `Mail.Read`, `Files.Read`, `Sites.Read.All`, `Calendars.Read`, `Chat.Read` | No | 1 |
+| `search` | Microsoft Search across mail, files, sites | `Mail.Read`, `Files.Read`, `Sites.Read.All`, `Calendars.Read`, `Chat.Read` | No¹ | 1 |
 | `teams` | Teams teams, channels, channel messages | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `TeamMember.Read.All` | **Yes** | 9 |
 | `directory` | Entra ID user and group lookups | `User.Read.All`, `Group.Read.All` | **Yes** | 9 |
 | `intune` | Intune managed device inventory | `DeviceManagementManagedDevices.Read.All` | **Yes** | 6 |
@@ -411,6 +443,8 @@ Tools are grouped by product area. Enable only the groups you need — the scope
 The three groups marked **Yes** request scopes that no ordinary user can consent to, so they stay disabled unless you pass `--org-mode`. Enabling them in a tenant where an administrator has not granted consent means sign-in fails outright, not that those tools quietly return errors.
 
 The **Admin consent** column is Microsoft's own classification of each permission. A tenant's consent policy is a second, separate gate, and it withholds more than this column shows — `Mail.Read` and `Calendars.Read` among them. See [Consent](#consent).
+
+¹ `search` itself needs no administrator, but one thing it can search does: the `chatMessage` index additionally requires `ChannelMessage.Read.All`, which belongs to `teams`. See [Search permissions](#search-permissions).
 
 The `generic` group is always on and cannot be selected or removed. It holds `graph_request` (the escape hatch for endpoints no other tool covers), `graph_schema` (fetches one item from a path and reports its property names and types), and `graph_list_permissions` (reports the enabled groups, their scopes, and the signed-in account).
 
@@ -427,15 +461,20 @@ The `generic` group is always on and cannot be selected or removed. It holds `gr
 </details>
 
 <details>
-<summary><b><code>mail</code></b> — Mail: 12 tools, 7 of them writes</summary>
+<summary><b><code>mail</code></b> — Mail: 13 tools, 7 of them writes</summary>
 
 Bodies are the expensive part of a mailbox, so list calls return `bodyPreview` only and `mail_get_message` fetches one message in full, HTML stripped to text by default.
 
+`mail_list_messages` and `mail_search_messages` no longer return `webLink` unless you ask for it with `includeWebLink`. An Outlook webLink is the message id a second time — URL-encoded and wrapped in an owa query — and on a real 217-row search it was 22% of the whole response. The `id` is what every other mail tool takes, so nothing you could do before is harder; naming `webLink` in `select` still works too.
+
+A reply chain is the expensive case, because Outlook quotes itself: message N carries most of messages 1..N-1 inside its own body, so reading a thread one call at a time sends the same paragraphs through the model's context once per reply. `mail_fetch_thread` reads the whole chain in one call and replaces each repeat with a marker naming the message that carried it first. On a measured 24-message Outlook thread that was 381,198 characters through `mail_get_message` and 85,171 through `mail_fetch_thread`, with every unique sentence preserved.
+
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
-| `mail_list_messages` |  | Lists Outlook messages newest-first, 10 per call by default (50 max), as a compact projection: id, subject, from, toRecipients, receivedDateTime, isRead, hasAttachments, bodyPreview and webLink. | `folderId`, `top`, `skip`, `filter`, `orderby`, `select`, `unreadOnly` |
-| `mail_search_messages` |  | Finds messages by text, returning the same compact projection as mail_list_messages, 10 per call by default (50 max). | **`query`**, `top`, `from`, `to`, `after`, `before`, `hasAttachments` |
-| `mail_get_message` |  | Returns one message with its body plus sender, recipients, timestamps, importance, conversationId and webLink. | **`id`**, `format`, `maxBodyChars` |
+| `mail_list_messages` |  | Lists Outlook messages newest-first, 10 per call by default (50 max), as a compact projection: id, subject, from, toRecipients, receivedDateTime, isRead, hasAttachments and bodyPreview. The Outlook `webLink` is off by default — see below. | `folderId`, `top`, `skip`, `filter`, `orderby`, `select`, `unreadOnly`, `includeWebLink` |
+| `mail_search_messages` |  | Finds messages by text, returning the same compact projection as mail_list_messages, 10 per call by default (50 max). | **`query`**, `top`, `from`, `to`, `after`, `before`, `hasAttachments`, `includeWebLink` |
+| `mail_get_message` |  | Returns one message with its body plus sender, recipients, timestamps, importance, conversationId and webLink. Do not loop it over a reply chain — use `mail_fetch_thread`. | **`id`**, `format`, `maxBodyChars`, `foldLinks` |
+| `mail_fetch_thread` |  | Reads a whole reply chain in one call, oldest-first, folding text the messages repeat at each other into markers like `[quoted from #3]`. Give it any message id of the thread, or an explicit list of ids. | `fromMessageId`, `ids`, `maxMessages`, `maxBodyChars`, `totalBodyChars`, `fold`, `foldLinks` |
 | `mail_list_folders` |  | Lists the top-level Outlook mail folders with their ids, unread counts and total counts, 50 per call by default. | `top`, `includeChildren` |
 | `mail_list_attachments` |  | Lists attachment metadata for one message — id, name, contentType, size in bytes, whether it is inline, and its kind (file, item, or reference) — 20 per call by default. | **`id`**, `top` |
 | `mail_send` | **write** | Sends a message immediately from the signed-in mailbox — there is no undo and no confirmation step, so confirm the recipients and text with the user first. | **`to`**, **`subject`**, **`body`**, `cc`, `bcc`, `contentType`, `saveToSentItems` |
@@ -576,7 +615,7 @@ Graph offers no `$select` and no date filter on chat messages, so projection hap
 
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
-| `search_query` |  | Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. | **`query`**, `entityTypes`, `from`, `size`, `fields` |
+| `search_query` |  | Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. Each `entityTypes` value asks only for the scope its own index needs — see [Search permissions](#search-permissions). | **`query`**, `entityTypes`, `from`, `size`, `fields` |
 
 </details>
 
@@ -694,7 +733,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 
 `MS365_MCP_AUTH_FLOW=interactive`, the undocumented value that used to select the browser flow, is still accepted as an alias for `browser`.
 
-`--discovery` is worth knowing about: with every group enabled the server exposes 101 tools, and 101 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees three tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, and `graph_list_permissions` reports the configuration. The model pays for a tool's schema only when it actually calls it.
+`--discovery` is worth knowing about: with every group enabled the server exposes 102 tools, and 102 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees three tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, and `graph_list_permissions` reports the configuration. The model pays for a tool's schema only when it actually calls it.
 
 ## Security
 

@@ -17,7 +17,7 @@ import type {
   ToolGroupMeta,
   ToolModule,
 } from '../contracts.js';
-import { GROUPS, scopesForGroups } from './groups.js';
+import { ADMIN_CONSENT_SCOPES, GROUPS, scopesForGroups } from './groups.js';
 import { normalizeGraphPath } from '../util/paths.js';
 
 /**
@@ -360,6 +360,12 @@ export const genericModule: ToolModule = {
             };
           });
 
+          // Per scope, not only per group. A group can be user-consentable
+          // overall and still carry one scope an administrator must grant, and
+          // the group flag alone sends the user to argue for the wrong thing.
+          const requested = genericScopes(config);
+          const needsAdmin = requested.filter((scope) => ADMIN_CONSENT_SCOPES.has(scope));
+
           const account = await describeSignedInAccount(graph);
 
           return {
@@ -375,6 +381,29 @@ export const genericModule: ToolModule = {
             adminConsentRequired: config.groups.filter(
               (name) => GROUPS[name]?.requiresAdminConsent === true,
             ),
+            adminConsentScopes: needsAdmin,
+            // The paragraph to hand the person who can actually unblock this.
+            // Without it the model tends to suggest signing in again, which for
+            // these scopes changes nothing however often it is repeated.
+            howToGetAdminConsent:
+              needsAdmin.length === 0
+                ? undefined
+                : {
+                    summary:
+                      `${needsAdmin.length} requested scope(s) sit in tool groups that need Microsoft 365 ` +
+                      'tenant administrator consent. A few are user-consentable on their own, but they ' +
+                      'arrive in one consent prompt with scopes that are not, and a prompt is approved ' +
+                      'or refused as a whole — so signing in again will not obtain them.',
+                    askAnAdministratorFor: needsAdmin,
+                    application: config.clientId === '' ? undefined : config.clientId,
+                    tenant: config.tenantId,
+                    where:
+                      'Entra admin center → Identity → Applications → App registrations → this ' +
+                      'application → API permissions → Grant admin consent.',
+                    thenRun:
+                      'After consent is granted, run the server\'s `login` command again with ' +
+                      '`--org-mode` and the owning tool group enabled.',
+                  },
             note:
               'A scope listed here is what this server asks for, not proof it was granted. ' +
               'Consent is recorded per application in Microsoft Entra ID.',

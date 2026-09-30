@@ -118,6 +118,21 @@ function describeGraphError(error: GraphError): string {
 }
 
 function signInMessage(error: InteractionRequiredError): string {
+  // A missing admin-consent scope is not a sign-in problem, and calling it one
+  // sends the user into a loop that cannot terminate: they sign in, consent to
+  // everything they are allowed to consent to, and the call fails identically.
+  // The headline has to say which of the two it is.
+  if (error.adminScopes.length > 0) {
+    const list = error.adminScopes.join(', ');
+    return [
+      'Blocked by missing tenant admin consent — not by a missing sign-in.',
+      `This call needs ${list}, which only a Microsoft 365 administrator can grant for this ` +
+        'application. Tell the user what to ask for rather than asking them to sign in again, ' +
+        'which will not change the outcome.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
   return [
     'Not signed in to Microsoft 365, or the stored session can no longer be refreshed.',
     'The user must run `npx ms-graph-mcp login` in a terminal, complete the sign-in, ' +
