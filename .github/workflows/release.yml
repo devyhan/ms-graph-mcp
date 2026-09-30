@@ -46,28 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------------
-      # BOOTSTRAP FOR THE FIRST PUBLISH ONLY — REMOVE AFTER 0.1.0 IS ON NPM.
-      #
-      # Trusted publishing cannot be configured until the package exists, so the
-      # very first release has to authenticate with a token. Provenance is not
-      # what needs the token: it comes from this job running on a GitHub-hosted
-      # runner with `id-token: write`, and it is produced the same way whether
-      # npm authenticated by OIDC or by a token. So `publishConfig.provenance`
-      # stays true and 0.1.0 is attested like every release after it.
-      #
-      # Once 0.1.0 is published:
-      #   1. Configure trusted publishing with the values in the header comment.
-      #   2. Delete the NPM_TOKEN repository secret.
-      #   3. Delete `registry-url` below and the `env:` block on `npm publish`.
-      # A token left in place after that is a stored credential this workflow no
-      # longer needs, which is the thing trusted publishing exists to remove.
-      # ---------------------------------------------------------------------
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          # Writes an .npmrc that reads NODE_AUTH_TOKEN. Goes away with step 3.
-          registry-url: 'https://registry.npmjs.org'
+          # No registry-url and no NODE_AUTH_TOKEN: authentication is the OIDC
+          # exchange, not a token written into .npmrc. The bootstrap that put a
+          # token here to create the package is gone; trusted publishing replaced it.
 
       - name: Assert npm is new enough for OIDC
         run: |
@@ -98,10 +82,6 @@ jobs:
       # test step here would only run everything twice. access and provenance
       # both come from publishConfig.
       - run: npm publish
-        env:
-          # Bootstrap only — see the block above. Empty once the secret is gone,
-          # at which point npm falls back to the OIDC exchange.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Where to check the attestation
         run: |
