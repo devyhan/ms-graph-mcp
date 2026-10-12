@@ -222,6 +222,16 @@ test('authFlow auto stays on the browser when it succeeds', async () => {
   assert.equal(client.device.length, 0);
 });
 
+test('a caller can force browser sign-in without changing the configured flow', async () => {
+  const client = fakeClient();
+  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+
+  await withCapturedStderr(() => provider.login(SCOPES, 'browser'));
+
+  assert.equal(client.interactive.length, 1);
+  assert.equal(client.device.length, 0);
+});
+
 test('preferredPort is sent only when authPort is greater than zero', async () => {
   const pinned = fakeClient();
   await withCapturedStderr(() =>

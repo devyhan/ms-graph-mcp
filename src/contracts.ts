@@ -36,20 +36,23 @@ export interface AuthProvider {
   getToken(scopes: string[]): Promise<string>;
   /** The signed-in account, or null when no session exists. */
   getAccount(): Promise<AccountInfo | null>;
-  /** Starts an interactive sign-in. Resolves once a session exists. */
-  login(scopes: string[]): Promise<AccountInfo>;
+  /**
+   * Starts an interactive sign-in and resolves once a session exists.
+   *
+   * `flow` is normally omitted so the configured CLI flow is used. Callers
+   * that expose a particular user experience, such as the browser-opening MCP
+   * sign-in tool, may force that flow without changing the server-wide config.
+   */
+  login(scopes: string[], flow?: AuthFlow): Promise<AccountInfo>;
   /** Clears the cached session. */
   logout(): Promise<void>;
   /**
    * Starts a device-code sign-in and returns as soon as there is a code to show,
    * without waiting for the person to use it.
    *
-   * This is the only sign-in shape that works from inside a tool call. The
-   * browser flow cannot: the MCP transport owns stdio, so there is nowhere to
-   * prompt and nothing may be written to stdout. The device authorization grant
-   * needs no local interaction at all — the code and URL travel back as ordinary
-   * tool output, the person finishes in whatever browser they like, and MSAL
-   * polls the token endpoint in the background.
+   * This remains available for headless callers. The normal MCP sign-in tool
+   * starts the browser flow in the background instead, while the device grant
+   * returns the code and URL as ordinary tool output.
    */
   beginDeviceLogin(scopes: string[]): Promise<DeviceLoginPrompt>;
   /** Where a sign-in started by `beginDeviceLogin` has got to. Never a token. */

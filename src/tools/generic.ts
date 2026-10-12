@@ -208,13 +208,33 @@ export const genericModule: ToolModule = {
     //
     // There was no way to authenticate from inside a conversation until now:
     // `login` is a CLI subcommand, so anyone who installed this as a plugin had
-    // to find a terminal before the server could do anything at all. The browser
-    // flow genuinely cannot run here — the transport owns stdio — but the device
-    // authorization grant never needed stdio, and leaving it out was an
-    // oversight rather than a constraint.
+    // to find a terminal before the server could do anything at all. An explicit
+    // tool call can safely launch the browser because the OAuth callback travels
+    // over a loopback HTTP listener, while MCP continues to own stdout.
     //
     // Two tools rather than one because a single blocking call would sit for the
     // minutes a person takes to finish and hit the client's timeout first.
+    type BrowserLogin = {
+      state: 'pending' | 'signedIn' | 'failed';
+      startedAt: string;
+      account?: string;
+      detail?: string;
+    };
+    let browserLogin: BrowserLogin | null = null;
+
+    function startedResponse(entry: BrowserLogin, wanted: string[]): Record<string, unknown> {
+      return {
+        state: entry.state,
+        flow: 'browser',
+        startedAt: entry.startedAt,
+        nextStep:
+          'The system browser has been asked to open Microsoft 365 sign-in on this machine. ' +
+          'Tell the user to finish signing in there, then call auth_login_status. Do not ask ' +
+          'for credentials or an authorization code in the conversation.',
+        scopesRequested: wanted,
+      };
+    }
+
     const authTools: ToolDefinition[] = [
       {
         name: 'auth_begin_login',
@@ -223,46 +243,57 @@ export const genericModule: ToolModule = {
         // in the tenant, and signing in changes nothing there; a read-only
         // install that could never authenticate would just be broken.
         description:
-          'Starts signing the user in to Microsoft 365 and returns a short code with the URL to ' +
-          'enter it at. Show them both, verbatim, and tell them the code is typed into the page ' +
-          'rather than pasted into this conversation. Then call auth_login_status to see whether ' +
-          'they finished — this tool returns as soon as there is a code, not when the sign-in is ' +
-          'done. Calling it again while a code is still valid returns the SAME code rather than ' +
-          'invalidating the one they are using. Use it when any tool reports that there is no ' +
-          'session; it is the only way to sign in from here, because the browser flow needs a ' +
-          'terminal this server does not have. Consent is asked for the scopes the enabled tool ' +
-          'groups need, so a narrower --groups means a smaller prompt. No token is ever returned.',
+          'Starts OAuth 2.0 browser sign-in to Microsoft 365 using authorization code + PKCE. ' +
+          'The system browser opens on this machine and the tool returns immediately while the ' +
+          'user signs in there; call auth_login_status afterward to see whether they finished. ' +
+          'Calling it again while a sign-in is pending reuses the same attempt instead of opening ' +
+          'another browser window. Use it when a tool reports that there is no session. Consent ' +
+          'is asked for the scopes the enabled tool groups need, so a narrower --groups means a ' +
+          'smaller prompt. Never ask the user to paste credentials or an authorization code into ' +
+          'the conversation. No token is ever returned.',
         inputSchema: z.object({}),
         scopes: [],
         group: GROUP.name,
         handler: async () => {
           // The same set the CLI `login` asks for, not the group scopes alone.
           const wanted = consentScopes();
-          const prompt = await auth.beginDeviceLogin(wanted);
-          return {
-            userCode: prompt.userCode,
-            verificationUri: prompt.verificationUri,
-            expiresAt: prompt.expiresAt,
-            nextStep:
-              'Tell the user to open the URL and enter the code, then call auth_login_status. ' +
-              `Wait at least ${prompt.pollIntervalSeconds} seconds between checks.`,
-            scopesRequested: wanted,
+          if (browserLogin?.state === 'pending') return startedResponse(browserLogin, wanted);
+
+          const entry: BrowserLogin = {
+            state: 'pending',
+            startedAt: new Date().toISOString(),
           };
+          browserLogin = entry;
+
+          // Intentionally not awaited: the tool must return before the user has
+          // spent minutes in the browser. MSAL owns the one-shot loopback
+          // listener and this continuation only records a token-free status.
+          void auth.login(wanted, 'browser').then(
+            (account) => {
+              entry.state = 'signedIn';
+              entry.account = account.username;
+            },
+            (error: unknown) => {
+              entry.state = 'failed';
+              entry.detail = error instanceof Error ? error.message : String(error);
+            },
+          );
+
+          return startedResponse(entry, wanted);
         },
       },
       {
         name: 'auth_login_status',
         title: 'Check the sign-in',
         description:
-          'Reports where a sign-in started by auth_begin_login has got to: "pending" (the user has ' +
-          'not finished; the code is repeated so you can show it again), "signedIn" (with the ' +
-          'account), "expired" (the code timed out — start another), "failed" (with the reason), or ' +
-          '"none" (no sign-in was started). Never returns a token. Poll it rather than waiting: ' +
-          'this returns immediately either way.',
+          'Reports where the browser sign-in started by auth_begin_login has got to: "pending" ' +
+          '(the user has not finished), "signedIn" (with the account), "failed" (with the ' +
+          'reason), or "none" (no sign-in was started). Never returns a token. Poll it rather ' +
+          'than waiting: this returns immediately either way.',
         inputSchema: z.object({}),
         scopes: [],
         group: GROUP.name,
-        handler: async () => auth.deviceLoginStatus(),
+        handler: async () => browserLogin ?? { state: 'none' as const },
       },
     ];
 

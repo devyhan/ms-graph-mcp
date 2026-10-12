@@ -888,9 +888,9 @@ export function createAuthProvider(opts: {
     async getToken(scopes: string[]): Promise<string> {
       const account = await resolveAccount();
       if (!account) {
-        // Deliberately no interactive fallback: the MCP transport owns stdio and
-        // a browser or prompt opened mid-request would corrupt the JSON-RPC
-        // stream. The caller must run `login` out of band.
+        // Deliberately no interactive fallback: a data request must not
+        // unexpectedly open a browser and stay pending while a person signs in.
+        // The caller must explicitly use auth_begin_login or the CLI command.
         throw new InteractionRequiredError(signInRequiredMessage(scopes), adminOnly(scopes));
       }
 
@@ -919,14 +919,14 @@ export function createAuthProvider(opts: {
       return account ? toAccountInfo(account) : null;
     },
 
-    async login(scopes: string[]): Promise<AccountInfo> {
+    async login(scopes: string[], flowOverride?: AuthFlow): Promise<AccountInfo> {
       // Before MSAL, before the network: an empty client ID can only come back
       // as AADSTS700038 several seconds later, saying less than this does.
       if (config.clientId.trim() === '') {
         throw new Error(missingClientIdMessage());
       }
 
-      const flow = resolveAuthFlow(config);
+      const flow = flowOverride ?? resolveAuthFlow(config);
       // Which app is about to be granted access, while the user can still stop.
       log(describeSignInTarget(config, clientIdSource));
 

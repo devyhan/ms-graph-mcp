@@ -2,9 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type {
+  AccountInfo,
   AuthProvider,
-  DeviceLoginPrompt,
-  DeviceLoginStatus,
   GraphBatchResponse,
   GraphClient,
   GraphResponse,
@@ -22,9 +21,9 @@ import { genericModule } from './generic.js';
  * There was no way to sign in from inside a conversation. `login` was a CLI
  * subcommand, so someone installing this as a Claude Code plugin had to go and
  * find a terminal before the server could do anything at all — and nothing in
- * 102 tools said so. The browser flow genuinely cannot run here, because the MCP
- * transport owns stdio, but the device authorization grant never needed stdio.
- * Leaving it out was an oversight.
+ * 102 tools said so. An explicit tool call can launch the system browser while
+ * MSAL receives the OAuth redirect over a loopback HTTP listener, without
+ * writing anything to the MCP-owned stdout stream.
  *
  * So what is locked in below is mostly presence and shape: the tools exist, they
  * survive `--read-only`, they are reachable in discovery mode, and they never
@@ -45,16 +44,16 @@ const config: ServerConfig = {
   maxOutputChars: 60_000,
   verbose: false,
   cacheDir: '/nonexistent',
-  authFlow: 'device',
+  authFlow: 'auto',
   authPort: 0,
   allowGenericWrite: false,
 };
 
-const PROMPT: DeviceLoginPrompt = {
-  userCode: 'ABCD-EFGH',
-  verificationUri: 'https://example.test/device',
-  expiresAt: '2099-01-01T00:00:00.000Z',
-  pollIntervalSeconds: 5,
+const ACCOUNT: AccountInfo = {
+  username: 'someone@example.test',
+  name: 'Someone',
+  tenantId: 'tenant-id',
+  homeAccountId: 'home-account-id',
 };
 
 function inertGraph(): GraphClient {
@@ -68,31 +67,35 @@ function inertGraph(): GraphClient {
   };
 }
 
-/** Records the scopes a sign-in asked for, and reports whatever status is set. */
-function stubAuth(
-  status: DeviceLoginStatus = { state: 'pending', prompt: PROMPT },
-): AuthProvider & { readonly asked: string[][] } {
+/** Records the scopes and forced flow while keeping browser sign-in pending. */
+function stubAuth(loginResult: Promise<AccountInfo> = new Promise(() => {})): AuthProvider & {
+  readonly asked: string[][];
+  readonly flows: Array<string | undefined>;
+} {
   const asked: string[][] = [];
+  const flows: Array<string | undefined> = [];
   return {
     asked,
+    flows,
     async getToken() {
       throw new Error('not exercised');
     },
     async getAccount() {
       return null;
     },
-    async login() {
-      throw new Error('not exercised');
+    login(scopes, flow) {
+      asked.push([...scopes]);
+      flows.push(flow);
+      return loginResult;
     },
     async logout() {
       // not exercised
     },
-    async beginDeviceLogin(scopes: string[]) {
-      asked.push([...scopes]);
-      return PROMPT;
+    async beginDeviceLogin() {
+      throw new Error('device sign-in is not exercised');
     },
     async deviceLoginStatus() {
-      return status;
+      return { state: 'none' as const };
     },
   };
 }
@@ -172,17 +175,30 @@ test('discovery mode exposes signing in without a lookup', async () => {
 // Behaviour
 // ---------------------------------------------------------------------------
 
-test('starting a sign-in returns a code and a URL, and no token', async () => {
+test('starting a sign-in launches the browser flow without waiting, and returns no token', async () => {
   const result = (await byName(toolsFor(), 'auth_begin_login').handler({})) as Record<string, unknown>;
 
-  assert.equal(result['userCode'], PROMPT.userCode);
-  assert.equal(result['verificationUri'], PROMPT.verificationUri);
+  assert.equal(result['state'], 'pending');
+  assert.equal(result['flow'], 'browser');
+  assert.ok(Date.parse(String(result['startedAt'])) > 0);
   assert.ok(String(result['nextStep']).includes('auth_login_status'), 'it says what to call next');
 
   const serialized = JSON.stringify(result);
   for (const forbidden of ['accessToken', 'access_token', 'refreshToken', 'Bearer']) {
     assert.ok(!serialized.includes(forbidden), `${forbidden} must not be returned`);
   }
+});
+
+test('starting again while the browser sign-in is pending reuses the attempt', async () => {
+  const auth = stubAuth();
+  const tools = toolsFor({}, auth);
+  const begin = byName(tools, 'auth_begin_login');
+
+  const first = await begin.handler({}) as Record<string, unknown>;
+  const second = await begin.handler({}) as Record<string, unknown>;
+
+  assert.equal(auth.asked.length, 1, 'only one interactive flow should be started');
+  assert.equal(second['startedAt'], first['startedAt']);
 });
 
 test('it asks for exactly what the CLI login asks for', async () => {
@@ -201,6 +217,7 @@ test('it asks for exactly what the CLI login asks for', async () => {
     tools,
   );
   assert.deepEqual([...(auth.asked[0] as string[])].sort(), expected);
+  assert.equal(auth.flows[0], 'browser', 'the MCP tool must not fall back to device code');
   // The per-tool extras are the whole point, so name one explicitly: a future
   // refactor that went back to group scopes would still pass a set comparison
   // against its own wrong answer.
@@ -221,17 +238,42 @@ test('a narrower group list still means a smaller consent prompt', async () => {
   assert.ok(!(narrow.asked[0] as string[]).includes('Mail.Read'), 'a mail scope with no mail group');
 });
 
-test('status is passed through unchanged, in every state', async () => {
-  for (const status of [
-    { state: 'none' } as const,
-    { state: 'pending', prompt: PROMPT } as const,
-    { state: 'signedIn', account: 'someone@example.test' } as const,
-    { state: 'expired', detail: 'timed out', prompt: PROMPT } as const,
-    { state: 'failed', detail: 'declined' } as const,
-  ]) {
-    const tool = byName(toolsFor({}, stubAuth(status)), 'auth_login_status');
-    assert.deepEqual(await tool.handler({}), status);
-  }
+test('status moves from none to pending to signed in', async () => {
+  let finish: (account: AccountInfo) => void = () => {};
+  const result = new Promise<AccountInfo>((resolve) => {
+    finish = resolve;
+  });
+  const tools = toolsFor({}, stubAuth(result));
+  const status = byName(tools, 'auth_login_status');
+
+  assert.deepEqual(await status.handler({}), { state: 'none' });
+  await byName(tools, 'auth_begin_login').handler({});
+  assert.equal((await status.handler({}) as Record<string, unknown>)['state'], 'pending');
+
+  finish(ACCOUNT);
+  await new Promise((resolve) => setImmediate(resolve));
+  const signedIn = await status.handler({}) as Record<string, unknown>;
+  assert.equal(signedIn['state'], 'signedIn');
+  assert.equal(signedIn['account'], ACCOUNT.username);
+  assert.ok(Date.parse(String(signedIn['startedAt'])) > 0);
+});
+
+test('a browser sign-in failure is reported without leaking credentials', async () => {
+  let fail: (error: Error) => void = () => {};
+  const result = new Promise<AccountInfo>((_resolve, reject) => {
+    fail = reject;
+  });
+  const tools = toolsFor({}, stubAuth(result));
+  const status = byName(tools, 'auth_login_status');
+
+  await byName(tools, 'auth_begin_login').handler({});
+  fail(new Error('AADSTS53003: blocked by conditional access'));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const reported = await status.handler({});
+  assert.equal((reported as Record<string, unknown>)['state'], 'failed');
+  assert.match(String((reported as Record<string, unknown>)['detail']), /AADSTS53003/);
+  assert.doesNotMatch(JSON.stringify(reported), /accessToken|refreshToken|Bearer/);
 });
 
 test('neither sign-in tool asks for a Graph scope', async () => {

@@ -171,14 +171,14 @@ first prompt.
 
 Then sign in without leaving the conversation. Ask Claude to sign you in, or say
 so when a tool reports there is no session: it calls `auth_begin_login`, which
-returns a short code and a URL. Open the URL, enter the code, and Claude confirms
-with `auth_login_status`.
+opens the system browser for an OAuth 2.0 authorization-code + PKCE sign-in and
+returns immediately. Finish in the browser, and Claude confirms the result with
+`auth_login_status`.
 
-That is the device authorization grant, and it is the only sign-in shape that
-works from inside a tool call. The browser flow cannot: the MCP transport owns
-stdout, so there is nowhere to prompt and nothing may be written there. A device
-code needs no local interaction at all — the code travels back as ordinary tool
-output and you finish in whatever browser you like.
+This works safely from a tool call because the finished authorization code
+returns to MSAL over a one-shot loopback HTTP listener; the MCP JSON-RPC stream
+on stdout remains untouched. The device authorization grant remains available
+from the CLI for SSH sessions, containers, and other headless environments.
 
 The terminal route still exists and is better when you have a terminal open
 anyway, because it opens the browser for you:
@@ -389,9 +389,9 @@ Both sign-in flows are OAuth 2.0, and both end with the same delegated access to
 
 **The session is a refresh token in an encrypted cache.** What sign-in leaves behind is the MSAL cache blob, encrypted with AES-256-GCM into `token-cache.enc` in your config directory (`~/.config/microsoft-graph-mcp` on macOS and Linux, `%APPDATA%\microsoft-graph-mcp` on Windows), with the 32-byte key beside it in `cache.key` at mode `0600`. See [Security](#security) for the details and for `--cache-dir`.
 
-**`getToken` never prompts.** In `serve` mode the server refreshes access tokens silently and does nothing else. When the refresh token has expired, been revoked, or no longer covers a scope, the tool call returns an error rather than starting a sign-in behind your back. That is deliberate: the MCP transport owns stdout, so a prompt or a browser launched in the middle of a request would corrupt the JSON-RPC stream.
+**`getToken` never prompts.** In `serve` mode the server refreshes access tokens silently and does nothing else. When the refresh token has expired, been revoked, or no longer covers a scope, the data tool returns an error rather than unexpectedly opening a browser and holding that request open. Interactive authentication starts only when the caller explicitly invokes `auth_begin_login`; that tool launches the browser in the background without writing to the MCP-owned stdout stream.
 
-**Signing in from a tool call.** A sign-in the caller asked for is a different thing from one that starts itself mid-request, and `auth_begin_login` is that first thing. It runs the device grant, which needs no local interaction: it returns a code and a URL as ordinary tool output, you finish in a browser, and `auth_login_status` reports when you are done. Neither tool ever returns a token, both survive `--read-only` — signing in changes nothing in the tenant — and both stay visible under `--discovery`, because a caller with no session cannot invoke a tool it has not discovered. The two sign-in paths ask for exactly the same scopes and leave the session in the same encrypted cache, so you can start in the conversation and carry on from the terminal or the other way round.
+**Signing in from a tool call.** A sign-in the caller asked for is a different thing from one that starts itself mid-request, and `auth_begin_login` is that first thing. It explicitly starts the browser grant in the background, returns while the user completes the Microsoft page, and `auth_login_status` reports when the redirect has been exchanged for a session. Neither tool ever returns a token, both survive `--read-only` — signing in changes nothing in the tenant — and both stay visible under `--discovery`, because a caller with no session cannot invoke a tool it has not discovered. The tool and CLI paths ask for exactly the same scopes and leave the session in the same encrypted cache, so you can start in the conversation and carry on from the terminal or the other way round.
 
 **This is a local server.** It does not implement the MCP authorization specification, and per that specification it should not: the spec covers HTTP transports and directs stdio servers to take credentials from the environment instead. So the server obtains user credentials itself, as an ordinary public OAuth client, and the MCP client is not involved in authentication at all. A remote HTTP mode — where the MCP client performs OAuth against Entra and the server exchanges that token for a Graph token on the user's behalf — is not implemented.
 
@@ -690,8 +690,8 @@ Always enabled and not selectable. Signing in lives here because it is needed be
 
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
-| `auth_begin_login` |  | Starts signing the user in and returns a short code with the URL to enter it at. Returns as soon as there is a code, not when the sign-in is done; calling it again while a code is live returns the same one. No token is ever returned. | none |
-| `auth_login_status` |  | Reports where a sign-in has got to: pending, signedIn, expired, failed or none. Never returns a token. | none |
+| `auth_begin_login` |  | Opens the system browser for OAuth 2.0 authorization code + PKCE sign-in and returns immediately. Reuses an in-progress attempt instead of opening another window. No token is ever returned. | none |
+| `auth_login_status` |  | Reports where a browser sign-in has got to: pending, signedIn, failed or none. Never returns a token. | none |
 | `graph_request` | **write** | Sends an arbitrary request to Microsoft Graph and returns the raw JSON response. | **`path`**, `method`, `version`, `query`, `body`, `maxPages` |
 | `graph_schema` |  | Fetches one item from a Graph path ($top=1) and reports the property names it carries with their JSON types, plus the @odata.context that names the resource type. | **`entityPath`**, `version` |
 | `graph_list_permissions` |  | Reports how this server is configured: which tool groups are enabled, the delegated Microsoft Graph scopes each one uses, which of them need a tenant administrator to consent, whether write tools are suppressed, and the signed-in account. | none |

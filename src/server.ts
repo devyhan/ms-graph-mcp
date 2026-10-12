@@ -186,13 +186,11 @@ function signInMessage(error: InteractionRequiredError): string {
   // and nothing here told them a catalogue was not where to look.
   return [
     'Not signed in to Microsoft 365, or the stored session can no longer be refreshed.',
-    'Call `auth_begin_login` to sign the user in from here. It returns a short code and a URL: ' +
-      'show them both exactly as given, tell the user the code is entered on that page rather ' +
-      'than typed back into this conversation, and then call `auth_login_status` to see whether ' +
-      'they finished. Do not ask them to open a terminal — that was the old answer and it is no ' +
-      'longer the only one.',
-    'A terminal still works if they prefer it, and opens the browser for them: ' +
-      '`npx @devyhan/ms-graph-mcp login`.',
+    'Call `auth_begin_login` to sign the user in from here. It opens the system browser for an ' +
+      'OAuth 2.0 authorization-code + PKCE sign-in and returns immediately; ask the user to ' +
+      'finish in that browser, then call `auth_login_status`. Never ask for their credentials or ' +
+      'an authorization code in the conversation.',
+    'A terminal still works if they prefer it: `npx @devyhan/ms-graph-mcp login`.',
     `Detail: ${error.message}`,
   ].join('\n');
 }
