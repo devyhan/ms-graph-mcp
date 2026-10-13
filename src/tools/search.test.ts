@@ -144,6 +144,23 @@ test('a mixed search splits, and neither half carries the other half’s scopes'
   assert.ok(!mail.scopes.includes('Sites.Read.All'), 'nor for SharePoint it never reads');
 });
 
+test('every entity type gets its own request', async () => {
+  // Only chatMessage used to split; the rest shared one request until a
+  // default message+driveItem search came back 400 with "Invalid entity type
+  // combination". Per-type requests are always valid.
+  const { tool, graph } = build();
+  await tool.handler({ query: 'roadmap', entityTypes: ['message', 'driveItem', 'event'] });
+
+  assert.equal(graph.sent.length, 3);
+  for (const split of graph.sent) {
+    assert.equal(split.entityTypes.length, 1, 'one type per request');
+  }
+  assert.deepEqual(
+    graph.sent.map((split) => split.entityTypes[0]),
+    ['message', 'driveItem', 'event'],
+  );
+});
+
 test('the declared scopes stay user-consentable', async () => {
   // ChannelMessage.Read.All needs a tenant administrator and belongs to the
   // `teams` group. Declaring it here would put every personal install behind an

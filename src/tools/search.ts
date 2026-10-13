@@ -131,27 +131,22 @@ function unique<T>(values: readonly T[]): T[] {
 }
 
 /**
- * Graph accepts exactly one searchRequest per call, and `chatMessage` cannot
- * share a request with any other entity type, so a mixed ask becomes two calls
- * whose hits are merged back together.
+ * One searchRequest per call, and one entity type per searchRequest.
+ *
+ * This used to keep every non-chat type in a single shared request, splitting
+ * off only `chatMessage` (the one combination Graph documents as invalid).
+ * Then a default `message` + `driveItem` search came back 400 with "Invalid
+ * entity type combination", so the valid-combination rules are evidently wider
+ * than documented — or tenant-variable. One bucket per type is always valid,
+ * keeps the per-index scope narrowing this tool already relies on, and costs
+ * one small POST per type; the caller merges the hits back together below.
  */
 function splitIntoBuckets(entityTypes: EntityType[]): Bucket[] {
-  const others = entityTypes.filter((type) => type !== 'chatMessage');
-  const buckets: Bucket[] = [];
-
-  if (others.length > 0) {
-    buckets.push({ entityTypes: others, scopes: scopesFor(others), supportsFields: true });
-  }
-
-  if (entityTypes.includes('chatMessage')) {
-    buckets.push({
-      entityTypes: ['chatMessage'],
-      scopes: scopesFor(['chatMessage']),
-      supportsFields: false,
-    });
-  }
-
-  return buckets;
+  return entityTypes.map((type) => ({
+    entityTypes: [type],
+    scopes: scopesFor([type]),
+    supportsFields: type !== 'chatMessage',
+  }));
 }
 
 function readString(source: Record<string, unknown>, key: string): string | undefined {
@@ -330,7 +325,7 @@ export const searchModule: ToolModule = {
         group: GROUP.name,
         scopes: SEARCH_SCOPES,
         description:
-          "Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. Defaults to 10 hits per entity-type group over ['message','driveItem']; page with `from`. Traps: chatMessage cannot be combined with other entity types, so a mixed request is split into two calls and merged, and its hits ignore `fields`; each split asks only for the scopes its own index needs — Sites.Read.All for driveItem, listItem and site, Mail.Read for message, Calendars.Read for event, and BOTH Chat.Read and ChannelMessage.Read.All for chatMessage. That last pair is the one to watch: ChannelMessage.Read.All needs tenant admin consent and is carried by the `teams` group, so a chat search needs `teams` enabled as well as `chat`, and without it Graph refuses the chatMessage split with a 403 naming both permissions while every other split still returns; results are ranked, not sorted by date, and freshly changed items may not be indexed yet. This is read-only despite using POST.",
+          "Runs a relevance-ranked Microsoft Search query across Microsoft 365 and returns a flattened list of hits, each with its rank, a text summary and the resource's id, name or subject, web URL and last-modified time. Defaults to 10 hits per entity-type group over ['message','driveItem']; page with `from`. Each entity type is searched in its own request and the hits merged, because Graph rejects some combinations outright (observed: message+driveItem 400s) and ranks stay per-request; chatMessage hits ignore `fields`. Each split asks only for the scopes its own index needs — Sites.Read.All for driveItem, listItem and site, Mail.Read for message, Calendars.Read for event, and BOTH Chat.Read and ChannelMessage.Read.All for chatMessage. That last pair is the one to watch: ChannelMessage.Read.All needs tenant admin consent and is carried by the `teams` group, so a chat search needs `teams` enabled as well as `chat`, and without it Graph refuses the chatMessage split with a 403 naming both permissions while every other split still returns; results are ranked, not sorted by date, and freshly changed items may not be indexed yet. This is read-only despite using POST.",
         inputSchema: searchQuerySchema,
         handler: async (args) => {
           const { query, entityTypes, from, size, fields } = searchQuerySchema.parse(args);
