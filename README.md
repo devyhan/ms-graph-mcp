@@ -153,7 +153,7 @@ sensible values for three of them:
 | Setting | Default | What it does |
 | --- | --- | --- |
 | Application (client) ID | none, and required | The Entra application to sign in with. The dialog will not accept an empty value, because there is nothing to fall back on. |
-| Directory (tenant) ID | `common` | Suits most work and school accounts. Use `consumers` for a personal Microsoft account. |
+| Directory (tenant) ID | `common` | Suits most work and school accounts. Use `consumers` for a personal Microsoft account. A single-tenant app registration needs your tenant ID instead — `common` is refused for it (`AADSTS50194`). |
 | Tool groups | the personal set | Profile, mail, calendar, files, To Do, contacts and search. A shorter list means a smaller consent prompt. |
 | Read-only | on | Hides every tool that writes and drops the write scopes from the consent request. Turn it off when you want the server to act, not just read. |
 
@@ -271,6 +271,18 @@ While the shared registration is unpublished, give each of these your own applic
 
 The server starts whether or not an application is configured. With none it writes a warning to stderr, lists its tools as normal, and fails every Graph call until you sign in.
 
+## Instructions for AI agents
+
+If you are an AI assistant working with this server, paste the block below into your context. It is the short form of [Consent](#consent), [Search permissions](#search-permissions) and [Sign-in errors](#sign-in-errors).
+
+```
+1. Call session_status once first: cached account (Entra ID, tenant, consented scopes) plus live GET /me reachability.
+2. If no session is signed in, call auth_begin_login (opens the system browser, returns immediately), ask the user to finish there, then call auth_login_status. Never ask for credentials or an authorization code.
+3. In discovery mode, orient via discover_tools and invoke what it names through call_tool.
+4. On errors, read the Hint and Blocked-by lines: they name the fix. Re-running login with the current --groups prompts only for what was added.
+5. For scope and consent questions see Consent, Search permissions and Sign-in errors in this README.
+```
+
 ## Which application am I signing in to
 
 **A shared application published by this project.** Unless you override it, the client ID the server presents to Entra is a multi-tenant registration this project publishes — the same one every other user of this package signs in with. The server picks one in this order, and stops at the first that is set:
@@ -348,7 +360,7 @@ npx @devyhan/ms-graph-mcp login --groups search,chat,teams,me --org-mode
 Once the shared registration ships, most users can skip this section. It remains the supported fallback for the reasons listed in [Which application am I signing in to](#which-application-am-i-signing-in-to), and until then it is the only way to sign in.
 
 1. Open the [Microsoft Entra admin center](https://entra.microsoft.com) and go to **Applications > App registrations > New registration**.
-2. Give it a name. Under **Supported account types**, pick the audience you need. A personal Microsoft account (outlook.com, hotmail.com) requires "Accounts in any organizational directory and personal Microsoft accounts"; a work or school account used only in its own tenant needs nothing more than the single-tenant option.
+2. Give it a name. Under **Supported account types**, pick the audience you need. A personal Microsoft account (outlook.com, hotmail.com) requires "Accounts in any organizational directory and personal Microsoft accounts"; a work or school account used only in its own tenant needs nothing more than the single-tenant option. If you keep the single-tenant option, every command must name that tenant (`--tenant-id <tenant-id>`): the default `common` endpoint is refused for single-tenant applications (`AADSTS50194`).
 3. Leave the redirect URI empty for now and click **Register**. Copy the **Application (client) ID** from the Overview page — that is the value for `--client-id`.
 4. Go to **Authentication > Add a platform > Mobile and desktop applications** and tick the redirect URI `http://localhost`. The browser flow, which is the default, redirects the finished sign-in there — to a listener on 127.0.0.1 — and fails without it.
 5. On the same page, scroll to **Advanced settings** and set **Allow public client flows** to **Yes**. Neither sign-in flow works without it.
@@ -411,6 +423,7 @@ Entra reports a failure as an `AADSTS` code inside the error text. These are the
 | --- | --- | --- |
 | `AADSTS700016` | The application exists, but not in the tenant you signed in to. A single-tenant registration returns this to every tenant except its own; so does one the tenant has blocked, or whose enterprise application an administrator deleted. | Sign in to the tenant that owns the registration (`--tenant-id <tenant-id>`), or use a multi-tenant registration. For the shared application, `--client-id` with your own is the fallback. |
 | `AADSTS700038` | Entra did not accept the value as an application identifier at all. A mistyped GUID, or one that was never registered. | Check what `status` prints against the **Application (client) ID** on the registration's Overview page, and correct `--client-id` or `MS365_MCP_CLIENT_ID`. |
+| `AADSTS50194` | The application is registered single-tenant but the server signs in through `common` (or `organizations`), which Entra refuses for such applications. | Sign in to the tenant that owns the registration (`--tenant-id <tenant-id>`), and restart the server; the cached session is reused, so retry before signing in again. |
 | `AADSTS50020` | The account comes from a different identity provider than the application accepts: a personal Microsoft account at a work-only application, or the reverse. | `--tenant-id consumers` for a personal Microsoft account; otherwise sign in with a work or school account. The server names the `--tenant-id` the failed run used. |
 | `AADSTS9002332` | The application accepts Microsoft Entra work or school users only, and you signed in with a personal Microsoft account. | Sign in with a work or school account, or pass `--client-id` for a registration whose audience includes personal accounts and add `--tenant-id consumers`. |
 | `AADSTS7000112`, `AADSTS700054` | The application is disabled in that tenant — its enterprise application was disabled, or the service principal was blocked from sign-in. | Ask an administrator to re-enable it under **Enterprise applications > Properties > "Enabled for users to sign-in"**, or pass `--client-id` with your own registration. |
@@ -419,7 +432,7 @@ Entra reports a failure as an `AADSTS` code inside the error text. These are the
 
 The server sorts these into three kinds, and only one of them falls back.
 
-**Application rejections** — the first five rows — are reported as `Sign-in failed (<code>)`, followed by the likely cause, the flag that fixes it, and the first line of what Entra actually said. `auto` does not retry them on the device code path: an application that is absent, disabled, or wrong for your account type is exactly as absent on another device. The MSAL stack goes to stderr separately, prefixed `[auth]`.
+**Application rejections** — the first six rows — are reported as `Sign-in failed (<code>)`, followed by the likely cause, the flag that fixes it, and the first line of what Entra actually said. `auto` does not retry them on the device code path: an application that is absent, disabled, or wrong for your account type is exactly as absent on another device. The MSAL stack goes to stderr separately, prefixed `[auth]`.
 
 **Consent decisions** — the last two rows, plus `AADSTS65001` and `AADSTS900941` — print `Sign-in was refused at the consent screen`, the number of scopes requested, and the subset of them the default tenant consent policy withholds from ordinary users. `auto` does not fall back here either, because the device code flow shows the same consent screen and would be refused the same way.
 

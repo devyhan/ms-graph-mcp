@@ -95,9 +95,29 @@ export class InteractionRequiredError extends Error {
    * so instead of sending the user round a loop that will not terminate.
    */
   readonly adminScopes: readonly string[];
-  constructor(message: string, adminScopes: readonly string[] = []) {
+  /**
+   * True when the server signs in through an endpoint its application cannot
+   * use — today, a single-tenant registration with the `/common` or
+   * `/organizations` authority (AADSTS50194). Signing in again fails
+   * identically; the message names the tenant to configure instead.
+   */
+  readonly tenantMismatch: boolean;
+  /**
+   * True when the session is fine but Entra has no consent on record for the
+   * scopes asked for (AADSTS65001 and friends). Signing in again with the
+   * current `--groups` is the fix; Entra prompts only for what was added.
+   */
+  readonly consentMissing: boolean;
+  constructor(
+    message: string,
+    adminScopes: readonly string[] = [],
+    tenantMismatch = false,
+    consentMissing = false,
+  ) {
     super(message);
     this.adminScopes = adminScopes;
+    this.tenantMismatch = tenantMismatch;
+    this.consentMissing = consentMissing;
   }
 }
 

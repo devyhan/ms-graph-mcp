@@ -61,6 +61,18 @@ const MAX_HISTORY_MESSAGES = 1000;
 /** Per-message body budget for a walk. The worst case for one call is maxMessages x this. */
 const MAX_HISTORY_BODY_CHARS = 2000;
 
+/** Most chats one recent-activity call covers. Above 20 the client splits the batch itself. */
+const MAX_ACTIVITY_CHATS = 25;
+
+/** Default breadth of a recent-activity call: wide enough to catch the day's threads. */
+const DEFAULT_ACTIVITY_CHATS = 10;
+
+/** Most messages per chat a recent-activity call returns. */
+const MAX_MESSAGES_PER_CHAT = 10;
+
+/** Default per-message body budget for a recent-activity call. */
+const DEFAULT_ACTIVITY_BODY_CHARS = 300;
+
 // ---------------------------------------------------------------------------
 // Graph payload shapes (only the parts these tools project)
 // ---------------------------------------------------------------------------
@@ -87,6 +99,24 @@ interface ChatPayload {
   } | null;
   onlineMeetingInfo?: { joinWebUrl?: string | null; calendarEventId?: string | null } | null;
   members?: ConversationMemberPayload[] | null;
+  lastMessagePreview?: LastMessagePreviewPayload | null;
+}
+
+/**
+ * The chat's latest message, as `$expand=lastMessagePreview` returns it. Shaped
+ * like a chatMessage but never verified against a live response, so every field
+ * is optional and the projection below reads only the documented ones.
+ */
+interface LastMessagePreviewPayload {
+  id?: string | null;
+  createdDateTime?: string | null;
+  messageType?: string | null;
+  from?: {
+    user?: { id?: string | null; displayName?: string | null } | null;
+    application?: { displayName?: string | null } | null;
+  } | null;
+  body?: { content?: string | null; contentType?: string | null } | null;
+  attachments?: unknown[] | null;
 }
 
 interface ChatMessagePayload {
@@ -130,6 +160,25 @@ function chatSegment(raw: string): string {
     );
   }
   return encodeURIComponent(id);
+}
+
+/**
+ * Pulls the opaque `$skiptoken` out of a `@odata.nextLink`, so the caller can
+ * page by passing one token rather than parsing a URL. Mirrors directory.ts:
+ * both casings, because Graph has returned both.
+ */
+function skipTokenFrom(nextLink: string | undefined): string | undefined {
+  if (nextLink === undefined) return undefined;
+  let url: URL;
+  try {
+    url = new URL(nextLink);
+  } catch {
+    return undefined;
+  }
+  const raw = url.searchParams.get('$skiptoken') ?? url.searchParams.get('$skipToken');
+  if (raw === null) return undefined;
+  const text = raw.trim();
+  return text.length === 0 ? undefined : text;
 }
 
 function projectMember(member: ConversationMemberPayload): Record<string, unknown> {
@@ -285,6 +334,39 @@ function historyRange(messages: readonly ChatMessagePayload[]): {
   return { from, to };
 }
 
+/**
+ * One activity row: the chat it came from plus the message itself. The preview
+ * shape is a structural subset of ChatMessagePayload, so both tiers project
+ * through the same history projector and body budget.
+ */
+function projectActivityRow(
+  chat: ChatPayload,
+  chatId: string,
+  msg: ChatMessagePayload,
+  bodyChars: number,
+): Record<string, unknown> {
+  return {
+    chatId,
+    // Always null for one-to-one chats, exactly as on the chat itself.
+    chatTopic: chat.topic ?? undefined,
+    chatType: chat.chatType ?? undefined,
+    ...projectHistoryMessage(msg, bodyChars),
+  };
+}
+
+/** Newest first; an unreadable timestamp sorts as the oldest row, never the newest. */
+function byCreatedDesc(
+  a: { msg: ChatMessagePayload },
+  b: { msg: ChatMessagePayload },
+): number {
+  const aMs = typeof a.msg.createdDateTime === 'string' ? Date.parse(a.msg.createdDateTime) : NaN;
+  const bMs = typeof b.msg.createdDateTime === 'string' ? Date.parse(b.msg.createdDateTime) : NaN;
+  const aSafe = Number.isNaN(aMs) ? Number.NEGATIVE_INFINITY : aMs;
+  const bSafe = Number.isNaN(bMs) ? Number.NEGATIVE_INFINITY : bMs;
+  if (aSafe !== bSafe) return bSafe - aSafe;
+  return (a.msg.id ?? '').localeCompare(b.msg.id ?? '');
+}
+
 // ---------------------------------------------------------------------------
 // Input schemas
 // ---------------------------------------------------------------------------
@@ -324,6 +406,15 @@ const listChatsInput = z.object({
         'chats, whose topic is always null. It multiplies the output size, so leave it off when ' +
         'listing many chats. Graph rejects $expand=members alongside some $filter expressions; ' +
         'drop the filter if the call fails.',
+    ),
+  skipToken: z
+    .string()
+    .min(1)
+    .max(4000)
+    .optional()
+    .describe(
+      'Cursor for the next page: pass the `skipToken` from the previous result, keeping `top`, ' +
+        '`filter` and `expandMembers` identical.',
     ),
 });
 
@@ -438,6 +529,49 @@ const fetchHistoryInput = z.object({
     ),
 });
 
+const recentActivityInput = z.object({
+  chats: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_ACTIVITY_CHATS)
+    .default(DEFAULT_ACTIVITY_CHATS)
+    .describe(
+      `How many of the most-active chats to cover, 1-${MAX_ACTIVITY_CHATS} ` +
+        `(default ${DEFAULT_ACTIVITY_CHATS}).`,
+    ),
+  messagesPerChat: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_MESSAGES_PER_CHAT)
+    .default(1)
+    .describe(
+      `Messages per chat, 1-${MAX_MESSAGES_PER_CHAT} (default 1). 1 projects only the ` +
+        'last-message preview from the single listing request; above 1 fetches recent ' +
+        'messages per chat in one batched call and merges them newest-first.',
+    ),
+  bodyChars: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_HISTORY_BODY_CHARS)
+    .default(DEFAULT_ACTIVITY_BODY_CHARS)
+    .describe(
+      `How much of each message body to keep, 0-${MAX_HISTORY_BODY_CHARS} characters ` +
+        `(default ${DEFAULT_ACTIVITY_BODY_CHARS}). HTML is stripped first and longer bodies ` +
+        'are cut with a marker.',
+    ),
+  includeSystem: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include system event messages — someone joined or left, a meeting started or ended. They ' +
+        'have no body and no sender and are identified by messageType. Off by default because they ' +
+        'say nothing about the conversation.',
+    ),
+});
+
 // ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
@@ -456,15 +590,16 @@ export const chatModule: ToolModule = {
           'Lists the Teams chats the signed-in user belongs to (one-to-one, group, and meeting ' +
           'chats — never channel conversations, which the teams group covers). Returns id, topic, ' +
           'chatType, createdDateTime and lastUpdatedDateTime for up to `top` chats (default 20), ' +
-          'plus a count and a nextLink when more exist. Two traps: the order is unspecified, so ' +
+          'plus a count, a nextLink and a skipToken when more exist — page by passing skipToken ' +
+          'back with every other argument identical. Two traps: the order is unspecified, so ' +
           'this is NOT a "most recent chats" list — filter or sort on lastUpdatedDateTime ' +
-          'yourself; and one-to-one chats always have a null topic, so pass expandMembers to see ' +
-          'who they are with.',
+          'yourself (or use chat_recent_activity); and one-to-one chats always have a null ' +
+          'topic, so pass expandMembers to see who they are with.',
         inputSchema: listChatsInput,
         scopes: READ_SCOPES,
         group: GROUP.name,
         handler: async (args) => {
-          const { top, filter, expandMembers } = listChatsInput.parse(args);
+          const { top, filter, expandMembers, skipToken } = listChatsInput.parse(args);
           const res = await graph.request({
             path: '/me/chats',
             method: 'GET',
@@ -472,6 +607,7 @@ export const chatModule: ToolModule = {
               $top: top,
               $filter: filter,
               $expand: expandMembers ? 'members' : undefined,
+              $skiptoken: skipToken,
             },
             scopes: READ_SCOPES,
           });
@@ -479,6 +615,7 @@ export const chatModule: ToolModule = {
           return {
             count: chats.length,
             nextLink: res.nextLink,
+            skipToken: skipTokenFrom(res.nextLink),
             chats: chats.map((chat) => projectChat(chat, expandMembers)),
           };
         },
@@ -695,6 +832,89 @@ export const chatModule: ToolModule = {
             // Only meaningful while history remains; a completed walk has nothing to resume.
             cursor: walk.reason === 'complete' ? undefined : walk.nextLink,
             messages: walk.items.map((msg) => projectHistoryMessage(msg, bodyChars)),
+          };
+        },
+      },
+      {
+        name: 'chat_recent_activity',
+        title: 'Recent chat activity',
+        description:
+          'Most-active Teams chats first with last-message preview each. Default is one request ' +
+          'server-ordered by lastMessagePreview/createdDateTime desc; set messagesPerChat above 1 ' +
+          'to include recent messages per chat via batched fetch, merged newest-first.',
+        inputSchema: recentActivityInput,
+        scopes: READ_SCOPES,
+        group: GROUP.name,
+        handler: async (args) => {
+          const { chats, messagesPerChat, bodyChars, includeSystem } =
+            recentActivityInput.parse(args);
+          // One request, server-ordered: ordering by the expanded preview is the
+          // only "most recent chats" ordering Graph offers. Never combined with
+          // $filter — whether the two compose on this collection is unverified.
+          const res = await graph.request({
+            path: '/me/chats',
+            method: 'GET',
+            query: {
+              $top: chats,
+              $orderby: 'lastMessagePreview/createdDateTime desc',
+              $expand: 'lastMessagePreview',
+            },
+            scopes: READ_SCOPES,
+          });
+          const listed = extractCollection<ChatPayload>(res.data);
+          const chatsScanned = listed.length;
+
+          const collected: Array<{ chat: ChatPayload; chatId: string; msg: ChatMessagePayload }> =
+            [];
+          if (messagesPerChat === 1) {
+            // The listing already carries each chat's latest message; no second call.
+            for (const chat of listed) {
+              const chatId = typeof chat.id === 'string' ? chat.id : undefined;
+              const preview = chat.lastMessagePreview;
+              // A chat with no preview has no messages to show; chatsScanned still counts it.
+              if (chatId === undefined || preview === null || preview === undefined) continue;
+              if (!includeSystem && !isOrdinaryMessage(preview)) continue;
+              collected.push({ chat, chatId, msg: preview });
+            }
+          } else {
+            const targets = listed.filter(
+              (chat): chat is ChatPayload & { id: string } => typeof chat.id === 'string',
+            );
+            if (targets.length > 0) {
+              const query = new URLSearchParams({
+                $top: String(messagesPerChat),
+                $orderby: 'createdDateTime desc',
+              }).toString();
+              const responses = await graph.batch(
+                targets.map((chat, index) => ({
+                  id: String(index),
+                  method: 'GET' as const,
+                  url: `/chats/${chatSegment(chat.id)}/messages?${query}`,
+                })),
+                READ_SCOPES,
+              );
+              for (const response of responses) {
+                const chat = targets[Number(response.id)];
+                if (chat === undefined) continue;
+                // One unreadable chat must not lose the others.
+                if (response.status < 200 || response.status >= 300) continue;
+                for (const msg of extractCollection<ChatMessagePayload>(response.body)) {
+                  if (!includeSystem && !isOrdinaryMessage(msg)) continue;
+                  collected.push({ chat, chatId: chat.id, msg });
+                }
+              }
+              collected.sort(byCreatedDesc);
+            }
+          }
+
+          const range = historyRange(collected.map((row) => row.msg));
+          return {
+            chatsScanned,
+            count: collected.length,
+            range,
+            activity: collected.map((row) =>
+              projectActivityRow(row.chat, row.chatId, row.msg, bodyChars),
+            ),
           };
         },
       },

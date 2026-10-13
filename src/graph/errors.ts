@@ -9,6 +9,7 @@
  */
 
 import { GraphError } from '../contracts.js';
+import { SCOPE_GUESSES } from '../util/scopes.js';
 
 /**
  * Statuses that clear on their own. 502 is included because the Graph gateway
@@ -40,26 +41,10 @@ const DEFAULT_CODES: ReadonlyMap<number, string> = new Map([
 ]);
 
 /**
- * Best-effort mapping from a Graph path to the delegated scopes that path needs,
- * so a 403 can name something concrete instead of "permission denied".
+ * Builds a GraphError from a failed Graph response. The 403 hint names the
+ * scopes the path normally needs via the table in `util/scopes.ts`, shared
+ * with `graph_request`.
  */
-const SCOPE_GUESSES: ReadonlyArray<{ readonly test: RegExp; readonly scopes: string }> = [
-  { test: /\/(messages|mailFolders|sendMail|mailboxSettings|inferenceClassification)\b/i, scopes: 'Mail.Read, Mail.ReadWrite or Mail.Send' },
-  { test: /\/(events|calendar|calendars|calendarView|calendarGroups)\b/i, scopes: 'Calendars.Read or Calendars.ReadWrite' },
-  { test: /^\/me\/contacts\b/i, scopes: 'Contacts.Read or Contacts.ReadWrite' },
-  { test: /\/(drive|drives|shares)\b/i, scopes: 'Files.Read, Files.Read.All or Files.ReadWrite.All' },
-  { test: /^\/sites\b/i, scopes: 'Sites.Read.All or Sites.ReadWrite.All' },
-  { test: /\/(chats|chatMessage)\b/i, scopes: 'Chat.Read, Chat.ReadWrite or ChatMessage.Send' },
-  { test: /(^\/teams|joinedTeams|\/channels)\b/i, scopes: 'Team.ReadBasic.All, Channel.ReadBasic.All or ChannelMessage.Read.All' },
-  { test: /\/todo\b/i, scopes: 'Tasks.Read or Tasks.ReadWrite' },
-  { test: /^\/planner\b/i, scopes: 'Tasks.Read or Tasks.ReadWrite, plus Group.Read.All for plans in a group' },
-  { test: /^\/groups\b/i, scopes: 'Group.Read.All or GroupMember.Read.All (tenant admin consent)' },
-  { test: /^\/(applications|servicePrincipals)\b/i, scopes: 'Application.Read.All (tenant admin consent)' },
-  { test: /^\/deviceManagement\b/i, scopes: 'DeviceManagementManagedDevices.Read.All (tenant admin consent)' },
-  { test: /^\/(users|directoryObjects|directoryRoles|administrativeUnits|contacts|organization|devices)\b/i, scopes: 'User.Read.All or Directory.Read.All (tenant admin consent)' },
-  { test: /^\/me\b/i, scopes: 'User.Read' },
-];
-
 export function parseGraphError(
   status: number,
   path: string,
@@ -236,8 +221,11 @@ function buildHint(ctx: {
 }
 
 function guessScopes(path: string): string {
+  // The table is shared with `graph_request` (see `util/scopes.ts`); only the
+  // prose half is read here, so a 403 names something concrete instead of
+  // "permission denied".
   for (const guess of SCOPE_GUESSES) {
-    if (guess.test.test(path)) return guess.scopes;
+    if (guess.test.test(path)) return guess.hint;
   }
   return 'the delegated scope documented for this resource';
 }

@@ -9,6 +9,7 @@
 import { z } from 'zod';
 
 import type {
+  AccountInfo,
   GraphVersion,
   HttpMethod,
   ServerConfig,
@@ -19,6 +20,7 @@ import type {
 } from '../contracts.js';
 import { ADMIN_CONSENT_SCOPES, GROUPS, scopesForGroups } from './groups.js';
 import { normalizeGraphPath } from '../util/paths.js';
+import { guessScopesForPath } from '../util/scopes.js';
 
 /**
  * Its scopes are the floor, not the ceiling: `graph_request` runs with the
@@ -98,6 +100,16 @@ const requestInput = z.object({
     .describe(
       `How many pages of a collection to follow via @odata.nextLink, 1-${MAX_PAGES}. Defaults ` +
         'to 1 (no paging). Pages are merged into a single value array.',
+    ),
+  scopes: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      'Scopes to request a token for. Defaults to the minimal scope guessed from `path` ' +
+        '(Mail.Read for a mail path, Chat.Read for a chat path, and so on), falling back to ' +
+        'the union of every enabled group when the path matches nothing known. Pass an ' +
+        'explicit list only when the endpoint needs a scope the guess does not cover.',
     ),
 });
 
@@ -288,17 +300,72 @@ export const genericModule: ToolModule = {
         description:
           'Reports where the browser sign-in started by auth_begin_login has got to: "pending" ' +
           '(the user has not finished), "signedIn" (with the account), "failed" (with the ' +
-          'reason), or "none" (no sign-in was started). Never returns a token. Poll it rather ' +
+          'reason), or "none" (no sign-in was started). When no browser sign-in was started ' +
+          'in this session it falls back to the cached account, so an existing CLI session ' +
+          'reports "signedIn" rather than "none". Never returns a token. Poll it rather ' +
           'than waiting: this returns immediately either way.',
         inputSchema: z.object({}),
         scopes: [],
         group: GROUP.name,
-        handler: async () => browserLogin ?? { state: 'none' as const },
+        handler: async () => {
+          // The closure only knows about a sign-in started in this session.
+          // Someone who signed in from the CLI (or an earlier session) has a
+          // cached account and no closure entry; reporting "none" would send
+          // them to sign in again for nothing. The MSAL cache is the
+          // authority, so ask it — and a cache read that fails leaves the
+          // closure state (or "none") standing rather than failing a probe.
+          if (browserLogin !== null) return browserLogin;
+          let cached: AccountInfo | null = null;
+          try {
+            cached = await auth.getAccount();
+          } catch {
+            cached = null;
+          }
+          if (cached === null) return { state: 'none' as const };
+          return { state: 'signedIn' as const, account: cached.username, source: 'cache' as const };
+        },
       },
     ];
 
     return [
       ...authTools,
+      {
+        name: 'session_status',
+        title: 'Check the session and consent',
+        description:
+          'Unified session and consent probe. Returns cached account (Entra ID, tenant, ' +
+          'consented scopes) plus live GET /me reachability. Call once first; on consent ' +
+          'errors re-run login with current --groups.',
+        inputSchema: z.object({}),
+        scopes: [...GROUP.readScopes],
+        group: GROUP.name,
+        handler: async () => {
+          // A probe that fails to probe is useless: each branch is caught so a
+          // dead cache read still reports live reachability and vice versa. The
+          // same reason graph_list_permissions never lets /me hide the map.
+          let cachedAccount: AccountInfo | null = null;
+          let cacheNote: string | undefined;
+          try {
+            cachedAccount = await auth.getAccount();
+          } catch (error) {
+            cacheNote =
+              'Could not read the cached account: ' +
+              (error instanceof Error ? error.message : String(error));
+          }
+          return {
+            cachedAccount,
+            ...(cacheNote === undefined ? {} : { cacheNote }),
+            liveAccount: await describeSignedInAccount(graph),
+            browserLogin: browserLogin ?? { state: 'none' as const },
+            scopesRequested: consentScopes(),
+            note:
+              'scopesRequested is what this server asks consent for, not proof it was ' +
+              'granted; consent is recorded per application in Microsoft Entra ID. When a ' +
+              'call fails for missing consent, re-run login with the current --groups: ' +
+              'Entra prompts only for what was added.',
+          };
+        },
+      },
       {
         name: 'graph_request',
         title: 'Call Microsoft Graph directly',
@@ -309,7 +376,9 @@ export const genericModule: ToolModule = {
           'far more text. The host is fixed to this tenant\'s Graph endpoint and `path` must be ' +
           'relative, so an absolute URL is rejected. GET is always available; the write methods ' +
           'require --allow-generic-write. Pass `maxPages` to follow @odata.nextLink, and prefer ' +
-          '$select and $top in `query` to keep the response small.',
+          '$select and $top in `query` to keep the response small. The call authenticates with ' +
+          'the minimal scope guessed from `path`, so a path whose scope is granted succeeds even ' +
+          'when an unrelated scope is missing; pass `scopes` to override the guess.',
         inputSchema: requestInput,
         // A read-only server still gets the GET hatch; only the write capability
         // is what makes this tool a write tool.
@@ -327,13 +396,22 @@ export const genericModule: ToolModule = {
           // argument, whereas the inline form is a convenience.
           const query: Record<string, string> = { ...inline, ...(parsed.query ?? {}) };
 
+          // The declared scopes stay the union — that is what consent is asked
+          // for — but the token request narrows to what this path needs. A
+          // union that includes an unconsented scope (an admin-consent one the
+          // user could never get, or a group widened since the last login)
+          // would otherwise fail a call its own scope covers. Narrowing is
+          // free where everything is consented: a silent token request for a
+          // subset of what was granted succeeds exactly as before.
+          const callScopes = parsed.scopes ?? guessScopesForPath(path) ?? scopes;
+
           const res = await graph.request({
             path,
             method,
             version,
             query,
             ...(method === 'GET' ? {} : { body: parsed.body }),
-            scopes,
+            scopes: callScopes,
             maxPages: parsed.maxPages ?? 1,
           });
 

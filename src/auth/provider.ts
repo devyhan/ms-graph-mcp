@@ -201,6 +201,48 @@ function signInRequiredMessage(scopes: string[], detail?: string): string {
 }
 
 /**
+ * What a caller reads when the stored session cannot be refreshed because the
+ * server signs in through an endpoint its application cannot use (AADSTS50194):
+ * a single-tenant registration with the `/common` or `/organizations`
+ * authority.
+ *
+ * Like the admin branch of `signInRequiredMessage` and unlike its sign-in
+ * branch, this must say that signing in again changes nothing: the same
+ * endpoint refuses every grant identically, so `auth_begin_login` — or another
+ * CLI `login` — fails the same way. The fix is configuration, and the cached
+ * session covers the corrected endpoint, so retrying comes before signing in.
+ */
+function tenantMismatchMessage(
+  scopes: string[],
+  config: Pick<ServerConfig, 'clientId' | 'tenantId'>,
+  detail: string,
+): string {
+  const clientId = config.clientId.trim() === '' ? '(none configured)' : config.clientId;
+  return [
+    'No usable Microsoft 365 session.',
+    `Signing in again will NOT fix this: application ${clientId} is registered single-tenant, but this server signs in through the /${config.tenantId} endpoint (AADSTS50194), which Entra refuses for such applications.`,
+    `Set the tenant that owns the registration — --tenant-id <tenant-id> or ${TENANT_ID_ENV} — and restart the server; retry the call before signing in again, because the cached session is reused once the endpoint matches.`,
+    `Scopes requested: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}.`,
+    `Underlying error: ${detail}`,
+  ].join(' ');
+}
+
+/**
+ * What a caller reads when the silent refresh fails for consent rather than
+ * for a dead session: the session is fine, Entra just has no consent on record
+ * for the scopes asked for — typically AADSTS65001 after `--groups` widened
+ * since the last login. Unlike the tenant mismatch above, signing in again is
+ * the fix, and Entra prompts only for what was added, so this names the scopes
+ * instead of the session.
+ */
+function consentRequiredMessage(scopes: string[]): string {
+  return (
+    `Blocked by missing consent for these scopes: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}. ` +
+    'Re-run login with current --groups (Entra prompts only for what was added).'
+  );
+}
+
+/**
  * What a stuck user reads. Every line names a cause they can act on, because
  * the raw MSAL error is usually a bare `ENOENT: xdg-open` or a redirect
  * mismatch code that says nothing about which knob to turn.
@@ -266,6 +308,9 @@ export type ClientIdSource = 'flag' | 'env' | 'shipped' | 'unset';
 /** The variable the config layer reads a client ID from. */
 const CLIENT_ID_ENV = 'MS365_MCP_CLIENT_ID';
 
+/** The variable the config layer reads a tenant ID from. */
+const TENANT_ID_ENV = 'MS365_MCP_TENANT_ID';
+
 /**
  * ` (from --client-id)` and friends, or an empty string when there is nothing
  * worth saying — no source given, or no application resolved at all.
@@ -316,7 +361,8 @@ type AppUnavailableKind =
   | 'not-an-app-id'
   | 'wrong-account-type'
   | 'disabled'
-  | 'entra-users-only';
+  | 'entra-users-only'
+  | 'single-tenant-common';
 
 interface AppUnavailableCase {
   /** The Entra error code, quoted back so the user can search for it. */
@@ -343,6 +389,9 @@ interface AppUnavailableCase {
  *   AADSTS700054   the app is disabled for this sign-in
  *   AADSTS9002332  the app takes Microsoft Entra users only; a personal
  *                  Microsoft account tried it
+ *   AADSTS50194    the app is registered single-tenant but the authority is
+ *                  a tenantless endpoint (`/common` or `/organizations`),
+ *                  which Entra refuses for such applications
  *
  * `(?!\d)` so a shorter code never matches inside a longer one.
  */
@@ -353,6 +402,7 @@ const APP_UNAVAILABLE: readonly AppUnavailableCase[] = [
   { code: 'AADSTS7000112', pattern: /AADSTS7000112(?!\d)/, kind: 'disabled' },
   { code: 'AADSTS700054', pattern: /AADSTS700054(?!\d)/, kind: 'disabled' },
   { code: 'AADSTS9002332', pattern: /AADSTS9002332(?!\d)/, kind: 'entra-users-only' },
+  { code: 'AADSTS50194', pattern: /AADSTS50194(?!\d)/, kind: 'single-tenant-common' },
 ];
 
 function matchAppUnavailable(err: unknown): AppUnavailableCase | null {
@@ -435,6 +485,12 @@ export function appUnavailableMessage(
           `Sign-in failed (${matched.code}): ${app} accepts Microsoft Entra work or school users only.`,
           'Likely cause: you signed in with a personal Microsoft account against an app whose signInAudience excludes them.',
           `Fix: sign in with a work or school account, or ${ownApp} for an app that allows personal Microsoft accounts, and add --tenant-id consumers.`,
+        ];
+      case 'single-tenant-common':
+        return [
+          `Sign-in failed (${matched.code}): ${app} is registered single-tenant, but this run signs in through the /${config.tenantId} endpoint, which Entra refuses for such applications.`,
+          'Likely cause: the registration\'s "Supported account types" is "Accounts in this organizational directory only" — the portal default for a new registration — while the server uses a tenantless authority.',
+          `Fix: sign in to the tenant that owns the registration with --tenant-id <tenant-id> (or set ${TENANT_ID_ENV}), and sign in again. From an MCP client, set the tenant in the server configuration and restart the server.`,
         ];
     }
   })();
@@ -907,6 +963,32 @@ export function createAuthProvider(opts: {
         // Expired or revoked refresh token, a new scope needing consent, or a
         // conditional-access challenge all land here and all need interaction.
         cachedAccount = null;
+        // Except the endpoint refusal: signing in again through the same
+        // tenantless endpoint fails identically, so this names the tenant fix
+        // and marks the error for the tool-result headline. Only this kind is
+        // special-cased — a wrong-account-type refusal, for example, can still
+        // be fixed by signing in with a different account.
+        if (matchAppUnavailable(err)?.kind === 'single-tenant-common') {
+          throw new InteractionRequiredError(
+            tenantMismatchMessage(scopes, config, describeError(err)),
+            adminOnly(scopes),
+            true,
+          );
+        }
+        // A consent refusal is not a dead session either: the refresh token is
+        // fine, Entra just has no consent on record for the scopes asked for.
+        // Signing in again with the current --groups prompts only for what was
+        // added, so this names the scopes instead of the session. The admin
+        // filter still applies: consent the tenant reserves to an administrator
+        // is refused the same way, and the headline must say so.
+        if (isConsentDecision(err)) {
+          throw new InteractionRequiredError(
+            consentRequiredMessage(scopes),
+            adminOnly(scopes),
+            false,
+            true,
+          );
+        }
         throw new InteractionRequiredError(
           signInRequiredMessage(scopes, describeError(err)),
           adminOnly(scopes),

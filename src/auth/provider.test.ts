@@ -82,6 +82,7 @@ function fakeClient(
   opts: {
     interactiveError?: Error;
     deviceError?: Error;
+    silentError?: Error;
     accounts?: MsalAccountInfo[];
     /**
      * Handed to `deviceCodeCallback` exactly as MSAL would: synchronously,
@@ -102,6 +103,7 @@ function fakeClient(
     silent,
     async acquireTokenSilent(request) {
       silent.push(request);
+      if (opts.silentError) throw opts.silentError;
       return authResult();
     },
     async acquireTokenInteractive(request) {
@@ -291,6 +293,78 @@ test('getToken never triggers an interactive flow', async () => {
   assert.equal(signedOut.device.length, 0);
 });
 
+test('a single-tenant application on a tenantless endpoint fails the refresh with a fix, not a sign-in loop', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error(
+      "AADSTS50194: Application '00000000-0000-0000-0000-000000000000' is not configured as a multi-tenant application. Usage of the /common endpoint is not supported for such applications.",
+    ),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.tenantMismatch, true);
+      assert.equal(err.adminScopes.length, 0);
+      assert.match(err.message, /AADSTS50194/);
+      assert.match(err.message, /single-tenant/);
+      assert.match(err.message, /will NOT fix/);
+      assert.match(err.message, /--tenant-id/);
+      assert.match(err.message, /MS365_MCP_TENANT_ID/);
+      assert.match(err.message, /restart the server/);
+      assert.match(err.message, /Scopes requested: User\.Read/);
+      return true;
+    },
+  );
+  assert.equal(client.interactive.length, 0);
+  assert.equal(client.device.length, 0);
+});
+
+test('any other silent-refresh failure still asks for a sign-in', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('interaction_required: the refresh token expired'),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.tenantMismatch, false);
+      assert.equal(err.consentMissing, false);
+      assert.match(err.message, /A sign-in is needed/);
+      assert.doesNotMatch(err.message, /will NOT fix/);
+      return true;
+    },
+  );
+});
+
+test('a silent refresh refused for missing consent names the scopes, not the session', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error(
+      'AADSTS65001: The user or admin has not consented to use the application.',
+    ),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.consentMissing, true);
+      assert.equal(err.tenantMismatch, false);
+      assert.equal(err.adminScopes.length, 0);
+      assert.match(err.message, /Blocked by missing consent for these scopes: User\.Read\./);
+      assert.match(err.message, /Re-run login with current --groups/);
+      assert.match(err.message, /prompts only for what was added/);
+      return true;
+    },
+  );
+  assert.equal(client.interactive.length, 0);
+  assert.equal(client.device.length, 0);
+});
+
 test('the legacy MS365_MCP_AUTH_FLOW=interactive value still selects the browser', async () => {
   const previous = process.env['MS365_MCP_AUTH_FLOW'];
   process.env['MS365_MCP_AUTH_FLOW'] = 'interactive';
@@ -351,6 +425,12 @@ const APP_UNAVAILABLE_CASES: ReadonlyArray<{
     name: 'AADSTS9002332 explains a work-account-only audience',
     error: 'AADSTS9002332: Application is configured for use by Microsoft Entra users only.',
     expected: [/AADSTS9002332/, /work or school/, /--tenant-id consumers/],
+  },
+  {
+    name: 'AADSTS50194 names the owning tenant for a single-tenant application',
+    error:
+      "AADSTS50194: Application '00000000-0000-0000-0000-000000000000' is not configured as a multi-tenant application. Usage of the /common endpoint is not supported for such applications.",
+    expected: [/AADSTS50194/, /single-tenant/, /--tenant-id/, /MS365_MCP_TENANT_ID/],
   },
 ];
 
@@ -438,10 +518,19 @@ test('a browser failure still falls back and still blames the browser', async ()
 test('isAppUnavailable matches whole codes only', () => {
   assert.equal(isAppUnavailable(new Error('AADSTS700016: not found in the directory')), true);
   assert.equal(isAppUnavailable('AADSTS9002332: Entra users only'), true, 'non-Error input');
+  assert.equal(
+    isAppUnavailable(new Error('AADSTS50194: not configured as a multi-tenant application')),
+    true,
+  );
   assert.equal(isAppUnavailable(new Error('spawn xdg-open ENOENT')), false);
   assert.equal(isAppUnavailable(new Error('AADSTS65004: the user declined consent')), false);
   assert.equal(
     isAppUnavailable(new Error('AADSTS500200: an unrelated code')),
+    false,
+    'a longer code must not match a shorter one',
+  );
+  assert.equal(
+    isAppUnavailable(new Error('AADSTS501940: an unrelated code')),
     false,
     'a longer code must not match a shorter one',
   );

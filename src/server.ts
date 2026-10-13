@@ -64,12 +64,60 @@ const MODULES: Record<string, ToolModule> = {
  * something returns 403. The sign-in pair is here for a blunter reason: a user
  * with no session cannot use `call_tool` to reach a tool they cannot discover,
  * and telling someone to open a terminal was the whole problem these two solve.
+ * `session_status` is the first call an agent makes — cached account plus live
+ * reachability in one probe, before any discovery lookup.
  */
 const ALWAYS_EXPOSED = new Set([
   'graph_list_permissions',
   'auth_begin_login',
   'auth_login_status',
+  'session_status',
 ]);
+
+/**
+ * What `initialize` tells every client, before any tool runs.
+ *
+ * One paragraph, not a manual: the sign-in pair and `session_status` are always
+ * exposed, so these lines can name them unconditionally. Kept as an export so a
+ * test can pin the exact wording — this is the first thing a new agent reads.
+ */
+export const SERVER_INSTRUCTIONS =
+  'Call session_status once first. Sign in via auth_begin_login and auth_login_status; ' +
+  'never ask for credentials. Orient via discover_tools. On errors read Hint/Blocked-by ' +
+  'lines; re-login adds only missing scopes.';
+
+/** The one prompt this server offers: orients a new agent session. */
+export const AGENT_START_PROMPT = {
+  name: 'agent_start',
+  title: 'Agent start',
+  description:
+    'Orients a new agent session: check session_status, sign in if needed via auth_begin_login ' +
+    'plus auth_login_status, orient via discover_tools, and follow Hint and Blocked-by lines on errors.',
+} as const;
+
+/**
+ * The `agent_start` prompt body: the instructions above, expanded into steps.
+ *
+ * A function of nothing, exported so a test can assert on the text. The
+ * registerPrompt callback below returns it unchanged.
+ */
+export function agentStartPrompt(): {
+  messages: [{ role: 'user'; content: { type: 'text'; text: string } }];
+} {
+  const text = [
+    'You are starting a new session with the Microsoft Graph MCP server: Microsoft 365 ' +
+      '(Outlook, Teams, OneDrive, SharePoint, To Do, Planner, Entra ID, Intune) over Microsoft Graph.',
+    '1. Call session_status once first. It reports the cached account (Entra ID, tenant, ' +
+      'consented scopes) plus whether Graph is reachable with a live GET /me.',
+    '2. If no session is signed in, call auth_begin_login — it opens the system browser ' +
+      'and returns immediately — ask the user to finish there, then call auth_login_status ' +
+      'to confirm. Never ask for credentials or an authorization code in the conversation.',
+    '3. Orient via discover_tools (under --discovery, invoke what it names through call_tool).',
+    '4. On errors, read the Hint and Blocked-by lines: they name the fix. Re-running login ' +
+      'with the current --groups prompts only for what was added.',
+  ].join('\n');
+  return { messages: [{ role: 'user', content: { type: 'text', text } }] };
+}
 
 /**
  * Tools whose effect a user cannot undo from inside this server: mail leaves
@@ -162,7 +210,26 @@ function describeGraphError(error: GraphError): string {
   return lines.join('\n');
 }
 
-function signInMessage(error: InteractionRequiredError): string {
+/** Exported for the test suite; the tool wrapper below is the only other caller. */
+export function signInMessage(error: InteractionRequiredError): string {
+  // A tenant/endpoint mismatch is not a sign-in problem either, and the loop
+  // it causes is the same shape: the user signs in through the same tenantless
+  // endpoint and Entra refuses every grant identically. This branch runs first
+  // because the endpoint refusal is the error that actually occurred — admin
+  // consent, if it is also missing, is a bridge crossed only after it is fixed.
+  if (error.tenantMismatch) {
+    return [
+      'Blocked by a server configuration problem — not by a missing sign-in.',
+      'The Entra application is registered single-tenant but the server signs in through a ' +
+        'tenantless endpoint, which Entra refuses for such applications. Tell the user to set ' +
+        'the tenant that owns the registration in the server configuration and restart the ' +
+        'server, then retry the call before signing in again. Signing in will not change the ' +
+        'outcome, so do not offer `auth_begin_login` for this one — the same endpoint refuses ' +
+        'every grant identically.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
   // A missing admin-consent scope is not a sign-in problem, and calling it one
   // sends the user into a loop that cannot terminate: they sign in, consent to
   // everything they are allowed to consent to, and the call fails identically.
@@ -175,6 +242,24 @@ function signInMessage(error: InteractionRequiredError): string {
         'application. Tell the user what to ask for. Signing in will not change the outcome, so ' +
         'do not offer `auth_begin_login` for this one — the consent prompt cannot grant a scope ' +
         'the tenant reserves to an administrator, however many times it is accepted.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
+  // Missing consent is not a missing sign-in either, but unlike the two
+  // branches above, signing in again IS the fix: the session is fine, Entra
+  // just has no consent on record for the scopes the detail line names —
+  // typically because --groups widened since the last login. This branch runs
+  // after the admin one because consent the tenant reserves to an
+  // administrator fails the same way, and that headline must win.
+  if (error.consentMissing) {
+    return [
+      'Blocked by missing consent — not by a missing sign-in.',
+      'The stored session is fine, but Microsoft Entra has no consent on record for the scopes ' +
+        'this call asked for. Call `auth_begin_login` to sign in again with the current ' +
+        '--groups: Entra prompts only for what was added. Ask the user to finish in the ' +
+        'browser, then call `auth_login_status`. A terminal works too: ' +
+        '`npx @devyhan/ms-graph-mcp login`.',
       `Detail: ${error.message}`,
     ].join('\n');
   }
@@ -216,7 +301,15 @@ export function createServerFactory(deps: FactoryDeps): () => McpServer {
   return function factory(): McpServer {
     const server = new McpServer(
       { name: SERVER_NAME, version: packageVersion() },
-      { capabilities: { tools: {} } },
+      { capabilities: { tools: {}, prompts: {} }, instructions: SERVER_INSTRUCTIONS },
+    );
+
+    // The prompt is the instructions expanded into steps, for clients that
+    // surface prompts. One prompt, no arguments: orientation, not a workflow.
+    server.registerPrompt(
+      AGENT_START_PROMPT.name,
+      { title: AGENT_START_PROMPT.title, description: AGENT_START_PROMPT.description },
+      () => agentStartPrompt(),
     );
 
     for (const def of exposed) {

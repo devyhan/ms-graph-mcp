@@ -31,7 +31,7 @@
       "type": "string",
       "title": "Directory (tenant) ID",
       "default": "common",
-      "description": "Your organisation's tenant ID. 'common' suits most work and school accounts; use 'consumers' for a personal Microsoft account, whose refresh tokens are rejected through 'common'."
+      "description": "Your organisation's tenant ID. 'common' suits most work and school accounts; use 'consumers' for a personal Microsoft account, whose refresh tokens are rejected through 'common'. A single-tenant app registration needs your tenant ID instead — 'common' is refused for it (AADSTS50194)."
     },
     "groups": {
       "type": "string",

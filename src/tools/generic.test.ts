@@ -6,6 +6,7 @@ import type {
   AuthProvider,
   GraphBatchResponse,
   GraphClient,
+  GraphRequestOptions,
   GraphResponse,
   ServerConfig,
   ToolDefinition,
@@ -68,7 +69,10 @@ function inertGraph(): GraphClient {
 }
 
 /** Records the scopes and forced flow while keeping browser sign-in pending. */
-function stubAuth(loginResult: Promise<AccountInfo> = new Promise(() => {})): AuthProvider & {
+function stubAuth(
+  loginResult: Promise<AccountInfo> = new Promise(() => {}),
+  account: AccountInfo | null = null,
+): AuthProvider & {
   readonly asked: string[][];
   readonly flows: Array<string | undefined>;
 } {
@@ -81,7 +85,7 @@ function stubAuth(loginResult: Promise<AccountInfo> = new Promise(() => {})): Au
       throw new Error('not exercised');
     },
     async getAccount() {
-      return null;
+      return account;
     },
     login(scopes, flow) {
       asked.push([...scopes]);
@@ -109,16 +113,30 @@ function stubAuth(loginResult: Promise<AccountInfo> = new Promise(() => {})): Au
 function toolsFor(
   over: Partial<ServerConfig> = {},
   auth: AuthProvider = stubAuth(),
+  graph: GraphClient = inertGraph(),
 ): ToolDefinition[] {
   const merged = { ...config, ...over };
   let built: ToolDefinition[] = [];
   built = collectTools({
-    graph: inertGraph(),
+    graph,
     config: merged,
     auth,
     consentScopes: () => consentScopesFor(merged, built),
   });
   return built;
+}
+
+/** Answers GET /me with a canned profile; everything else is refused. */
+function meGraph(me: Record<string, unknown>): GraphClient {
+  const request = (async (): Promise<GraphResponse> => ({ status: 200, data: me }));
+  const refuse = async (): Promise<never> => {
+    throw new Error('only /me is stubbed');
+  };
+  return {
+    request: request as unknown as GraphClient['request'],
+    batch: refuse as unknown as () => Promise<GraphBatchResponse[]>,
+    follow: refuse as unknown as GraphClient['follow'],
+  };
 }
 
 function byName(tools: ToolDefinition[], name: string): ToolDefinition {
@@ -303,4 +321,146 @@ test('a scope-only catalogue still lists the sign-in tools', async () => {
   // missing from that output is a tool a reader does not know exists.
   const names = toolsFor({}, scopeReadingOnlyAuth()).map((tool) => tool.name);
   assert.ok(names.includes('auth_begin_login'));
+});
+
+// ---------------------------------------------------------------------------
+// session_status: the unified first-call probe
+// ---------------------------------------------------------------------------
+
+test('the catalogue offers a unified session probe', async () => {
+  const probe = byName(toolsFor(), 'session_status');
+  assert.notEqual(probe.write, true, 'session_status must not be flagged as a write');
+  assert.deepEqual(probe.scopes, ['User.Read'], 'the live /me leg needs only User.Read');
+  assert.ok(probe.description.includes('Call once first'));
+});
+
+test('discovery mode exposes the session probe without a lookup', async () => {
+  // It is the first call an agent makes; hiding it behind discover_tools
+  // would defeat the point.
+  const merged = { ...config, discovery: true };
+  const names = exposedToolNames(toolsFor({ discovery: true }), merged);
+  assert.ok(names.includes('session_status'), `exposed: ${names.join(', ')}`);
+});
+
+test('session_status reports the cached account plus live reachability', async () => {
+  const tools = toolsFor(
+    {},
+    stubAuth(new Promise(() => {}), ACCOUNT),
+    meGraph({
+      id: 'user-id',
+      displayName: 'Someone',
+      userPrincipalName: 'someone@example.test',
+    }),
+  );
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  const cached = result['cachedAccount'] as Record<string, unknown>;
+  assert.equal(cached['username'], ACCOUNT.username);
+  assert.equal(cached['tenantId'], ACCOUNT.tenantId);
+
+  const live = result['liveAccount'] as Record<string, unknown>;
+  assert.equal(live['signedIn'], true);
+  assert.equal(live['displayName'], 'Someone');
+
+  assert.equal((result['browserLogin'] as Record<string, unknown>)['state'], 'none');
+  assert.ok((result['scopesRequested'] as string[]).includes('User.Read'));
+  assert.doesNotMatch(JSON.stringify(result), /accessToken|refreshToken|Bearer/);
+});
+
+test('session_status survives a dead cache and a dead Graph', async () => {
+  // A probe must not fail when the thing it probes is broken: each branch
+  // reports its own failure and the rest still answers.
+  const auth: AuthProvider = {
+    ...stubAuth(),
+    getAccount: async () => {
+      throw new Error('cache locked');
+    },
+  };
+  const result = (await byName(toolsFor({}, auth), 'session_status').handler({})) as Record<
+    string,
+    unknown
+  >;
+
+  assert.equal(result['cachedAccount'], null);
+  assert.match(String(result['cacheNote']), /cache locked/);
+  const live = result['liveAccount'] as Record<string, unknown>;
+  assert.equal(live['signedIn'], false);
+  assert.ok(typeof live['note'] === 'string');
+  assert.ok(Array.isArray(result['scopesRequested']));
+});
+
+test('login status falls back to the cached account when no browser sign-in was started', async () => {
+  // The closure only knows about a sign-in started in this session. Without
+  // the fallback, an existing CLI session reported "none" and the caller
+  // signed in again for nothing.
+  const tools = toolsFor({}, stubAuth(new Promise(() => {}), ACCOUNT));
+  const reported = (await byName(tools, 'auth_login_status').handler({})) as Record<string, unknown>;
+  assert.equal(reported['state'], 'signedIn');
+  assert.equal(reported['account'], ACCOUNT.username);
+});
+
+test('an in-progress browser sign-in wins over the cached account', async () => {
+  const tools = toolsFor({}, stubAuth(new Promise(() => {}), ACCOUNT));
+  await byName(tools, 'auth_begin_login').handler({});
+  const reported = (await byName(tools, 'auth_login_status').handler({})) as Record<string, unknown>;
+  assert.equal(reported['state'], 'pending');
+});
+
+// ---------------------------------------------------------------------------
+// graph_request scope narrowing
+// ---------------------------------------------------------------------------
+
+/** Records every request and answers `{}`: graph_request shape, not Graph data. */
+function recordingGraph(): GraphClient & { readonly requests: GraphRequestOptions[] } {
+  const requests: GraphRequestOptions[] = [];
+  const refuse = async (): Promise<never> => {
+    throw new Error('only request is stubbed');
+  };
+  return {
+    requests,
+    async request<T = unknown>(opts: GraphRequestOptions): Promise<GraphResponse<T>> {
+      requests.push(opts);
+      return { status: 200, data: {} as T };
+    },
+    batch: refuse as unknown as () => Promise<GraphBatchResponse[]>,
+    follow: refuse as unknown as GraphClient['follow'],
+  };
+}
+
+test('graph_request declares the union but asks for the minimal scope', async () => {
+  const graph = recordingGraph();
+  const tools = toolsFor({ groups: ['me', 'mail', 'chat'] }, stubAuth(), graph);
+  const def = byName(tools, 'graph_request');
+
+  // Declared scopes are what consent is asked for, so the union stays — while
+  // the token request narrows to what this path needs.
+  assert.ok(def.scopes.includes('Mail.Read'));
+  assert.ok(def.scopes.includes('Chat.Read'));
+  assert.ok(def.scopes.length > 1);
+
+  await def.handler({ path: '/me/chats' });
+
+  assert.equal(graph.requests.length, 1);
+  assert.deepEqual(graph.requests[0]?.scopes, ['Chat.Read']);
+});
+
+test('graph_request falls back to the union for an unknown path', async () => {
+  const graph = recordingGraph();
+  const tools = toolsFor({ groups: ['me', 'mail', 'chat'] }, stubAuth(), graph);
+  const def = byName(tools, 'graph_request');
+
+  await def.handler({ path: '/some/future/resource' });
+
+  assert.equal(graph.requests.length, 1);
+  assert.deepEqual(graph.requests[0]?.scopes, def.scopes);
+});
+
+test('an explicit scopes list overrides the path guess', async () => {
+  const graph = recordingGraph();
+  const tools = toolsFor({}, stubAuth(), graph);
+
+  await byName(tools, 'graph_request').handler({ path: '/me/chats', scopes: ['Chat.ReadWrite'] });
+
+  assert.equal(graph.requests.length, 1);
+  assert.deepEqual(graph.requests[0]?.scopes, ['Chat.ReadWrite']);
 });
