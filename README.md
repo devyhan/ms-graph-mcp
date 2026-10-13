@@ -78,8 +78,8 @@ re-requesting and hoping.
   shipped a string-concatenated path that allowed an `@attacker.com` host escape.
 - **Read-only mode.** `--read-only` removes write tools from the catalogue entirely, so a client
   never sees them.
-- **Least-privilege consent.** The scopes requested at sign-in are derived from the enabled groups
-  and the tools inside them, so `--groups mail --read-only` asks for `Mail.Read` and nothing else.
+- **Least-privilege consent.** Sign-in is incremental: a bare login asks only for the minimal
+  set, and each tool call authenticates with just the scopes its own index needs.
 - **Retry and backoff.** 429 and 503 are retried with `Retry-After` honoured; a mutating request is
   replayed only when Graph said it did not process it.
 
@@ -135,7 +135,7 @@ Either way, check it worked:
 npx @devyhan/ms-graph-mcp status
 ```
 
-`status` prints the application ID in use and where it came from, the account it resolved, and the scopes this configuration will request. Then point an MCP client at the server.
+`status` prints the application ID in use and where it came from, the account it resolved, and the scopes this configuration may request. Then point an MCP client at the server.
 
 ### As a Claude Code plugin
 
@@ -154,7 +154,7 @@ sensible values for three of them:
 | --- | --- | --- |
 | Application (client) ID | none, and required | The Entra application to sign in with. The dialog will not accept an empty value, because there is nothing to fall back on. |
 | Directory (tenant) ID | `common` | Suits most work and school accounts. Use `consumers` for a personal Microsoft account. A single-tenant app registration needs your tenant ID instead — `common` is refused for it (`AADSTS50194`). |
-| Tool groups | the personal set | Profile, mail, calendar, files, To Do, contacts and search. A shorter list means a smaller consent prompt. |
+| Tool groups | the personal set | Profile, mail, calendar, files, To Do, contacts and search. Sign-in asks only for the minimal set plus the scopes you name. |
 | Read-only | on | Hides every tool that writes and drops the write scopes from the consent request. Turn it off when you want the server to act, not just read. |
 
 Read-only defaults to on here, and to off on the command line. The plugin is the
@@ -427,8 +427,8 @@ Entra reports a failure as an `AADSTS` code inside the error text. These are the
 | `AADSTS50020` | The account comes from a different identity provider than the application accepts: a personal Microsoft account at a work-only application, or the reverse. | `--tenant-id consumers` for a personal Microsoft account; otherwise sign in with a work or school account. The server names the `--tenant-id` the failed run used. |
 | `AADSTS9002332` | The application accepts Microsoft Entra work or school users only, and you signed in with a personal Microsoft account. | Sign in with a work or school account, or pass `--client-id` for a registration whose audience includes personal accounts and add `--tenant-id consumers`. |
 | `AADSTS7000112`, `AADSTS700054` | The application is disabled in that tenant — its enterprise application was disabled, or the service principal was blocked from sign-in. | Ask an administrator to re-enable it under **Enterprise applications > Properties > "Enabled for users to sign-in"**, or pass `--client-id` with your own registration. |
-| `AADSTS65004` | The consent screen was declined. Nothing was granted and no session was created. | Ask for less: a narrower `--groups`, or `--read-only` to drop the write scopes. |
-| `AADSTS90093` | The requested permissions need an administrator, and the signed-in user is not allowed to grant them. | Drop the admin-consent groups (do not pass `--org-mode`) and narrow `--groups`, or have an administrator grant consent once, as in [Consent](#consent). |
+| `AADSTS65004` | The consent screen was declined. Nothing was granted and no session was created. | Ask for less: sign in bare for the minimal set and add scopes with `--scopes` as tools need them, or `--read-only` to drop the write scopes from a `--full` request. |
+| `AADSTS90093` | The requested permissions need an administrator, and the signed-in user is not allowed to grant them. | Drop the admin-consent groups (do not pass `--org-mode`) and sign in for fewer scopes, or have an administrator grant consent once, as in [Consent](#consent). |
 
 The server sorts these into three kinds, and only one of them falls back.
 
@@ -444,7 +444,7 @@ The server sorts these into three kinds, and only one of them falls back.
 
 ### Tool groups
 
-Tools are grouped by product area. Enable only the groups you need — the scopes requested at sign-in are derived from the enabled groups, so a narrower selection means a narrower consent prompt.
+Tools are grouped by product area. Enable only the groups you need — fewer tools, less surface. Sign-in is incremental: a bare login asks only for the minimal set, and consent grows as tools are first used.
 
 | Group | Product | Delegated scopes | Admin consent | Tools |
 | --- | --- | --- | --- | --- |
@@ -774,7 +774,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 
 **Generic writes are opt-in separately.** Even without `--read-only`, `graph_request` refuses POST, PATCH, PUT and DELETE unless `--allow-generic-write` is passed. A purpose-built tool states in its description exactly what it changes; an arbitrary write to an arbitrary path does not.
 
-**Least-privilege groups.** The scopes requested at sign-in are derived from the enabled groups and their tools, so enabling `--groups mail` asks for mail permissions and nothing else. `--read-only` also drops the write scopes from the consent request, rather than consenting to permissions the server will never exercise. The three admin-consent groups are excluded unless `--org-mode` is passed, so a personal-account user is never shown a consent prompt they cannot satisfy.
+**Least-privilege groups.** Each tool call authenticates with just the scopes its own index needs, and sign-in is incremental — a bare login asks only for the minimal set, so enabling `--groups mail` never prompts for permissions outside mail. `--read-only` also drops the write tools from the catalogue, rather than exposing operations the server will never exercise. The three admin-consent groups are excluded unless `--org-mode` is passed, so a personal-account user is never shown a consent prompt they cannot satisfy.
 
 **A shared client ID is an identifier, not a credential.** The application ID the server ships with is public by construction — it appears in every authorize URL — and it grants nothing on its own. Access still requires an interactive sign-in by a user, consent recorded in that user's tenant, and a refresh token held on that user's machine. What it does mean for a tenant is a service principal visible to its administrators; see [Which application am I signing in to](#which-application-am-i-signing-in-to).
 
