@@ -230,15 +230,19 @@ function tenantMismatchMessage(
 /**
  * What a caller reads when the silent refresh fails for consent rather than
  * for a dead session: the session is fine, Entra just has no consent on record
- * for the scopes asked for — typically AADSTS65001 after `--groups` widened
- * since the last login. Unlike the tenant mismatch above, signing in again is
+ * for the scopes asked for — typically AADSTS65001 for a tool used the first
+ * time since sign-in. Unlike the tenant mismatch above, signing in again is
  * the fix, and Entra prompts only for what was added, so this names the scopes
- * instead of the session.
+ * instead of the session, with both ways to consent to just them.
  */
 function consentRequiredMessage(scopes: string[]): string {
+  const list = scopes.length > 0 ? scopes.join(', ') : '(none)';
   return (
-    `Blocked by missing consent for these scopes: ${scopes.length > 0 ? scopes.join(', ') : '(none)'}. ` +
-    'Re-run login with current --groups (Entra prompts only for what was added).'
+    `Blocked by missing consent for these scopes: ${list}. ` +
+    'Sign in again for just these scopes — from a tool call, `auth_begin_login` with ' +
+    '`scopes`; from a terminal, `npx @devyhan/ms-graph-mcp login --scopes ' +
+    `${scopes.join(',')}` +
+    '` — and Entra prompts only for what was added.'
   );
 }
 
@@ -715,9 +719,10 @@ export function createAuthProvider(opts: {
       'Nothing was granted and no session was created.',
       '',
       'What usually fixes this:',
-      '  - Ask for less. Sign in with a narrower --groups set and widen it later;',
-      '    Entra prompts again only for the permissions you add.',
-      '  - Add --read-only, which drops every write permission from the request.',
+      '  - Ask for less. A bare `login` asks only for the minimal set; consent to',
+      '    more with `login --scopes …` as tools need them, and Entra prompts again',
+      '    only for the permissions you add.',
+      '  - Add --read-only, which drops every write permission from a --full request.',
     ];
     if (blocked.length > 0) {
       lines.push(
@@ -977,7 +982,7 @@ export function createAuthProvider(opts: {
         }
         // A consent refusal is not a dead session either: the refresh token is
         // fine, Entra just has no consent on record for the scopes asked for.
-        // Signing in again with the current --groups prompts only for what was
+        // Signing in again for just those scopes prompts only for what was
         // added, so this names the scopes instead of the session. The admin
         // filter still applies: consent the tenant reserves to an administrator
         // is refused the same way, and the headline must say so.

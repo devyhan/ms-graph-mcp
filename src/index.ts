@@ -25,7 +25,7 @@ import {
 } from './config.js';
 import { createGraphClient } from './graph/client.js';
 import { collectTools, createServerFactory } from './server.js';
-import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, scopesForGroups } from './tools/groups.js';
+import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, loginScopesFor, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
 
 /** Scopes every session asks for regardless of which groups are enabled. */
@@ -82,13 +82,14 @@ function buildSession(config: ServerConfig, clientIdSource: ClientIdSource): Ses
 }
 
 /**
- * The consent set for a sign-in.
+ * The full consent set a configuration may need.
  *
  * The group catalogue is the coarse grouping; individual tools declare extra
  * scopes it does not list (`me_get_mailbox_settings` needs
- * `MailboxSettings.Read`, for instance), and a scope nobody asks for at login
- * is a scope that 403s at call time. Under `--read-only` the write tools are
+ * `MailboxSettings.Read`, for instance). Under `--read-only` the write tools are
  * suppressed, so their scopes are left out rather than consented to for nothing.
+ * A bare sign-in asks for less than this (see `runLogin`); this is what
+ * `login --full` asks for and what `status` and `permissions` report.
  */
 /**
  * One line describing how `login` will sign the user in. Both flows are OAuth
@@ -171,10 +172,21 @@ async function runLogin(parsed: ParsedConfig): Promise<number> {
   }
 
   const { auth, tools } = buildSession(config, clientIdSource);
-  const scopes = consentScopes(config, tools);
+  // Incremental consent: a bare login asks only for the minimal set, `--scopes`
+  // names what to add, and `--full` restores the old ask-everything behaviour
+  // for scripts and admin pre-consent flows.
+  const loginArgs = parsed.command.kind === 'login' ? parsed.command : undefined;
+  const scopes =
+    loginArgs?.full === true
+      ? consentScopes(config, tools)
+      : loginScopesFor(loginArgs?.scopes);
 
   // Progress goes to stderr so a caller can pipe the account line on stdout.
   err(`Signing in to ${config.authority} for ${scopes.length} delegated scopes.\n`);
+  if (loginArgs?.full !== true) {
+    err('Requesting the minimal set plus the scopes named; consent for more is asked\n');
+    err('when a tool first needs it (`login --scopes …`, or `login --full` for all).\n');
+  }
   // Shipping an application removes the REGISTRATION barrier, never the
   // CONSENT one, and the user is about to grant OUR app access to their
   // mailbox. Say so while they can still stop.
@@ -255,7 +267,7 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
   out(`${pad('Cache:')}${cachePaths(config.cacheDir).cacheFile}\n`);
 
   const scopes = consentScopes(config, tools);
-  out(`\nDelegated scopes requested (${scopes.length}):\n`);
+  out(`\nDelegated scopes this configuration may request (${scopes.length}):\n`);
   for (const scope of scopes) out(`  ${scope}\n`);
 
   const adminGroups = config.groups.filter((name) => GROUPS[name]?.requiresAdminConsent === true);
@@ -320,7 +332,7 @@ function runPermissions(config: ServerConfig): number {
   const all = consentScopes(config, tools);
   const admin = all.filter((scope) => ADMIN_CONSENT_SCOPES.has(scope));
 
-  out(`\nAll ${all.length} scopes this configuration requests:\n`);
+  out(`\nAll ${all.length} scopes this configuration may request:\n`);
   out(`${all.join(' ')}\n`);
 
   if (admin.length === 0) {

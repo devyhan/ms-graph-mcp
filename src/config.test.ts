@@ -200,6 +200,24 @@ test('subcommands and env fallbacks are honoured', () => {
   assert.equal(isClientIdUnset(config.clientId), false);
 });
 
+test('login carries its scopes and full flag on the command, not the config', () => {
+  const bare = parseConfig(['login'], NO_ENV);
+  assert.deepEqual(bare.command, { kind: 'login' });
+
+  const scoped = parseConfig(['login', '--scopes', 'Mail.Read, Calendars.Read'], NO_ENV);
+  assert.deepEqual(scoped.command, {
+    kind: 'login',
+    scopes: ['Mail.Read', 'Calendars.Read'],
+  });
+
+  const full = parseConfig(['login', '--full'], NO_ENV);
+  assert.deepEqual(full.command, { kind: 'login', full: true });
+});
+
+test('--scopes rejects an empty list', () => {
+  assert.throws(() => parseConfig(['login', '--scopes', ' , '], NO_ENV), /at least one scope/);
+});
+
 test('--preset all drops admin-consent groups unless --org-mode is set', () => {
   const adminGroups = GROUP_NAMES.filter((name) => GROUPS[name]?.requiresAdminConsent === true);
   assert.deepEqual(adminGroups, ['teams', 'directory', 'intune']);

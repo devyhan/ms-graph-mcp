@@ -218,6 +218,33 @@ export function resolveGroups(opts: {
 }
 
 /**
+ * The scopes a sign-in asks for when the caller names none.
+ *
+ * Sign-in is incremental: the first login asks only for this minimal set, and
+ * consent for anything else is requested when a tool first needs it. Asking
+ * for the whole configuration up front put one ungrantable scope in charge of
+ * the entire sign-in — a tenant that withholds a single permission from
+ * ordinary users blocked every tool, including the ones its policy allowed.
+ */
+export const MINIMAL_LOGIN_SCOPES: readonly string[] = ['User.Read', 'offline_access'];
+
+/**
+ * The scope set for one sign-in: the minimal set plus whatever the caller
+ * named. Blank entries are dropped, the rest are trimmed and deduped, and the
+ * result is sorted so two callers asking for the same scopes produce the same
+ * request. Open by design: a scope outside the enabled groups (a `graph_request`
+ * override, say) consents exactly the same way.
+ */
+export function loginScopesFor(extra?: readonly string[]): string[] {
+  const scopes = new Set<string>(MINIMAL_LOGIN_SCOPES);
+  for (const raw of extra ?? []) {
+    const scope = raw.trim();
+    if (scope !== '') scopes.add(scope);
+  }
+  return [...scopes].sort();
+}
+
+/**
  * The delegated scopes to request for a set of groups. `offline_access` keeps
  * refresh tokens working and `User.Read` is needed to identify the account,
  * so both are always included.
@@ -294,11 +321,14 @@ export function groupOwningScope(scope: string): string | undefined {
  * MailboxSettings.Read, `calendar_get_schedule` needs Calendars.Read.Shared,
  * `files_list_shared` needs Files.Read.All, `search_query` needs Chat.Read.
  *
- * Both sign-in paths go through this. They used not to: the CLI computed the
- * union while the in-conversation tool asked only for the group scopes, so a
- * default install that signed in from the conversation was left with five tools
- * that returned 403 for ever, with nothing to suggest a second sign-in would
- * help. One function is the only way that stays fixed.
+ * This is the full set a configuration may need — what `status` and
+ * `permissions` report, and what `login --full` asks for. An ordinary sign-in
+ * no longer goes through this: it asks for the minimal set plus the scopes the
+ * caller names (`loginScopesFor`), and consent grows incrementally as tools
+ * are first used. The two used to disagree — the CLI asked for the union while
+ * the in-conversation tool asked for the group scopes alone, leaving five
+ * tools permanently returning 403 — which is why the full set still lives in
+ * exactly one function.
  */
 export function consentScopesFor(
   config: Pick<ServerConfig, 'groups' | 'readOnly'>,

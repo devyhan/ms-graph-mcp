@@ -18,7 +18,7 @@ import type {
   ToolGroupMeta,
   ToolModule,
 } from '../contracts.js';
-import { ADMIN_CONSENT_SCOPES, GROUPS, scopesForGroups } from './groups.js';
+import { ADMIN_CONSENT_SCOPES, GROUPS, loginScopesFor, scopesForGroups } from './groups.js';
 import { normalizeGraphPath } from '../util/paths.js';
 import { guessScopesForPath } from '../util/scopes.js';
 
@@ -128,6 +128,18 @@ const schemaInput = z.object({
 
 const permissionsInput = z.object({});
 
+const beginLoginInput = z.object({
+  scopes: z
+    .array(z.string().min(1))
+    .min(1)
+    .optional()
+    .describe(
+      'Delegated scopes to consent to on top of the minimal sign-in set, e.g. ["Mail.Read"]. ' +
+        'Omit it for the minimal set alone. When a tool fails for missing consent, pass the ' +
+        'scopes its error names: Entra prompts only for what was added.',
+    ),
+});
+
 /** Splits an optional inline query string off a caller-supplied path. */
 function splitPath(raw: string): { path: string; inline: Record<string, string> } {
   const mark = raw.indexOf('?');
@@ -229,12 +241,14 @@ export const genericModule: ToolModule = {
     type BrowserLogin = {
       state: 'pending' | 'signedIn' | 'failed';
       startedAt: string;
+      /** The scopes the in-flight attempt asks for, so a reuse reports them, not the new ask. */
+      scopes: string[];
       account?: string;
       detail?: string;
     };
     let browserLogin: BrowserLogin | null = null;
 
-    function startedResponse(entry: BrowserLogin, wanted: string[]): Record<string, unknown> {
+    function startedResponse(entry: BrowserLogin): Record<string, unknown> {
       return {
         state: entry.state,
         flow: 'browser',
@@ -243,7 +257,7 @@ export const genericModule: ToolModule = {
           'The system browser has been asked to open Microsoft 365 sign-in on this machine. ' +
           'Tell the user to finish signing in there, then call auth_login_status. Do not ask ' +
           'for credentials or an authorization code in the conversation.',
-        scopesRequested: wanted,
+        scopesRequested: entry.scopes,
       };
     }
 
@@ -259,21 +273,25 @@ export const genericModule: ToolModule = {
           'The system browser opens on this machine and the tool returns immediately while the ' +
           'user signs in there; call auth_login_status afterward to see whether they finished. ' +
           'Calling it again while a sign-in is pending reuses the same attempt instead of opening ' +
-          'another browser window. Use it when a tool reports that there is no session. Consent ' +
-          'is asked for the scopes the enabled tool groups need, so a narrower --groups means a ' +
-          'smaller prompt. Never ask the user to paste credentials or an authorization code into ' +
+          'another browser window. Use it when a tool reports that there is no session, and ' +
+          'again with `scopes` when a tool reports missing consent: sign-in is incremental, so ' +
+          'a bare call asks only for the minimal set and each repeat consents to just what was ' +
+          'added. Never ask the user to paste credentials or an authorization code into ' +
           'the conversation. No token is ever returned.',
-        inputSchema: z.object({}),
+        inputSchema: beginLoginInput,
         scopes: [],
         group: GROUP.name,
-        handler: async () => {
-          // The same set the CLI `login` asks for, not the group scopes alone.
-          const wanted = consentScopes();
-          if (browserLogin?.state === 'pending') return startedResponse(browserLogin, wanted);
+        handler: async (args) => {
+          if (browserLogin?.state === 'pending') return startedResponse(browserLogin);
 
+          // The minimal set plus whatever the caller named — the same rule the
+          // CLI `login` applies. Consent grows one sign-in at a time instead of
+          // demanding the whole configuration up front.
+          const wanted = loginScopesFor(beginLoginInput.parse(args).scopes);
           const entry: BrowserLogin = {
             state: 'pending',
             startedAt: new Date().toISOString(),
+            scopes: wanted,
           };
           browserLogin = entry;
 
@@ -291,7 +309,7 @@ export const genericModule: ToolModule = {
             },
           );
 
-          return startedResponse(entry, wanted);
+          return startedResponse(entry);
         },
       },
       {
@@ -335,7 +353,7 @@ export const genericModule: ToolModule = {
         description:
           'Unified session and consent probe. Returns cached account (Entra ID, tenant, ' +
           'consented scopes) plus live GET /me reachability. Call once first; on consent ' +
-          'errors re-run login with current --groups.',
+          'errors sign in again with just the missing scopes.',
         inputSchema: z.object({}),
         scopes: [...GROUP.readScopes],
         group: GROUP.name,
@@ -359,10 +377,11 @@ export const genericModule: ToolModule = {
             browserLogin: browserLogin ?? { state: 'none' as const },
             scopesRequested: consentScopes(),
             note:
-              'scopesRequested is what this server asks consent for, not proof it was ' +
-              'granted; consent is recorded per application in Microsoft Entra ID. When a ' +
-              'call fails for missing consent, re-run login with the current --groups: ' +
-              'Entra prompts only for what was added.',
+              'scopesRequested is the full set this configuration may ask consent for, not ' +
+              'proof it was granted; consent is recorded per application in Microsoft Entra ' +
+              'ID. Sign-in is incremental: a bare login asks only for the minimal set, and ' +
+              'when a call fails for missing consent, signing in again with just those ' +
+              'scopes prompts only for what was added.',
           };
         },
       },

@@ -37,7 +37,7 @@
       "type": "string",
       "title": "Tool groups",
       "default": "me,mail,calendar,files,todo,contacts,search",
-      "description": "Comma-separated product areas: me, mail, calendar, files, todo, planner, contacts, chat, sharepoint, search, teams, directory, intune. The scopes requested at sign-in are derived from this, so a shorter list means a smaller consent prompt. The last three need tenant administrator consent."
+      "description": "Comma-separated product areas: me, mail, calendar, files, todo, planner, contacts, chat, sharepoint, search, teams, directory, intune. Sign-in is incremental: a bare login asks only for the minimal set, and consent grows as tools are first used. The last three need tenant administrator consent."
     },
     "read_only": {
       "type": "boolean",

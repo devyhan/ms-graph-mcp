@@ -279,7 +279,7 @@ If you are an AI assistant working with this server, paste the block below into 
 1. Call session_status once first: cached account (Entra ID, tenant, consented scopes) plus live GET /me reachability.
 2. If no session is signed in, call auth_begin_login (opens the system browser, returns immediately), ask the user to finish there, then call auth_login_status. Never ask for credentials or an authorization code.
 3. In discovery mode, orient via discover_tools and invoke what it names through call_tool.
-4. On errors, read the Hint and Blocked-by lines: they name the fix. Re-running login with the current --groups prompts only for what was added.
+4. On errors, read the Hint and Blocked-by lines: they name the fix. Re-running login with only the missing scopes prompts only for what was added.
 5. For scope and consent questions see Consent, Search permissions and Sign-in errors in this README.
 ```
 
@@ -314,14 +314,14 @@ If you are an AI assistant working with this server, paste the block below into 
 
 **Personal Microsoft accounts** consent for themselves — no administrator, no tenant policy. In exchange, a large part of the catalogue is unavailable to them at any consent level: the Teams chat and channel APIs are documented as not supported for delegated personal-account access, and Planner, SharePoint, the directory tools and Intune do not exist for a personal account at all. Use a narrow group set, and sign in against the personal-account authority with `--tenant-id consumers`; a refresh token issued through the `common` authority is rejected at its first refresh.
 
-**Ask for less, then widen.** The scopes requested at sign-in are derived from the enabled groups, so start narrow and add:
+**Sign-in is incremental.** A bare `login` asks only for the minimal set (`User.Read`, `offline_access`), and consent grows as tools are first used: when a call fails for missing consent, its error names the scopes, and signing in again with just those prompts only for what was added. From a conversation, call `auth_begin_login` with `scopes`; from a terminal:
 
 ```
-npx @devyhan/ms-graph-mcp login --groups me,mail
-npx @devyhan/ms-graph-mcp login --groups me,mail,calendar,files
+npx @devyhan/ms-graph-mcp login
+npx @devyhan/ms-graph-mcp login --scopes Mail.Read,Calendars.Read
 ```
 
-Entra prompts again only for what you added; what was already granted stays granted. `--read-only` drops every write scope from the request. `npx @devyhan/ms-graph-mcp permissions --preset work` prints the exact scope list for a configuration, formatted for pasting into an admin consent request.
+What was already granted stays granted. `login --full` restores the old ask-everything behaviour for scripts and admin pre-consent flows, and `--read-only` drops every write scope from a `--full` request. `npx @devyhan/ms-graph-mcp permissions --preset work` prints the exact scope list a configuration may need, formatted for pasting into an admin consent request.
 
 ## Search permissions
 
@@ -349,10 +349,10 @@ npx @devyhan/ms-graph-mcp permissions --groups search,chat,teams,me --org-mode
 
 The tools say the same thing at the point of failure. A call blocked by a missing admin scope answers with **"Blocked by missing tenant admin consent — not by a missing sign-in"**, names the scope, and says which group to enable afterwards — rather than telling you to sign in again, which for these scopes changes nothing however many times you do it. `graph_list_permissions` returns the same detail as structured fields (`adminConsentScopes`, `howToGetAdminConsent`) so an assistant can relay it.
 
-Once an administrator has granted the scope, sign in again with the owning group enabled:
+Once an administrator has granted the scope, sign in again for just it (with the owning group enabled so the tool exists):
 
 ```
-npx @devyhan/ms-graph-mcp login --groups search,chat,teams,me --org-mode
+npx @devyhan/ms-graph-mcp login --scopes ChannelMessage.Read.All --groups search,chat,teams,me --org-mode
 ```
 
 ## Register your own Entra application
@@ -731,10 +731,10 @@ ms-graph-mcp [command] [options]
 | Command | Effect |
 | --- | --- |
 | `serve` | Run the MCP server on stdio. The default when no command is given. |
-| `login` | Sign in and write the token cache. Opens a browser by default; see `--auth-flow`. |
+| `login` | Sign in and write the token cache. Asks only for the minimal scopes unless `--scopes` / `--full` widen it. Opens a browser by default; see `--auth-flow`. |
 | `logout` | Clear the stored token cache. |
 | `status` | Print the signed-in account and the resolved configuration. |
-| `permissions` | Print the delegated scopes this configuration requests, grouped. |
+| `permissions` | Print the delegated scopes this configuration may request, grouped. |
 
 Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. Boolean environment variables accept `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`. An unrecognised flag is a hard error rather than a silent no-op.
 
@@ -745,6 +745,8 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 | `--cloud <name>` | `MS365_MCP_CLOUD` | `global` | Sovereign cloud: `global`, `usgov`, `usgovdod`, `china`. Anything but `global` needs `--client-id`. |
 | `--auth-flow <name>` | `MS365_MCP_AUTH_FLOW` | `auto` | Interactive sign-in flow: `auto`, `browser`, `device`. |
 | `--auth-port <n>` | `MS365_MCP_AUTH_PORT` | `0` | Loopback port for the browser flow's redirect. `0` lets the OS pick. |
+| `--scopes <a,b,c>` | | minimal set | Delegated scopes for `login` to request on top of the minimal set. |
+| `--full` | | off | Ask `login` for every scope the configuration may need. |
 | `--groups <a,b,c>` | `MS365_MCP_GROUPS` | see presets | Comma-separated tool groups to enable. |
 | `--preset <name>` | `MS365_MCP_PRESET` | `personal` | Group bundle: `personal`, `work`, `admin`, `all`. |
 | `--read-only` | `MS365_MCP_READ_ONLY` | off | Hide every tool that writes. |

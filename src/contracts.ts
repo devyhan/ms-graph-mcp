@@ -104,8 +104,8 @@ export class InteractionRequiredError extends Error {
   readonly tenantMismatch: boolean;
   /**
    * True when the session is fine but Entra has no consent on record for the
-   * scopes asked for (AADSTS65001 and friends). Signing in again with the
-   * current `--groups` is the fix; Entra prompts only for what was added.
+   * scopes asked for (AADSTS65001 and friends). Signing in again for just
+   * those scopes is the fix; Entra prompts only for what was added.
    */
   readonly consentMissing: boolean;
   constructor(
@@ -283,7 +283,7 @@ export interface ToolDeps {
    */
   auth: AuthProvider;
   /**
-   * Every scope this configuration will ask consent for, including the extras
+   * Every scope this configuration may ask consent for, including the extras
    * individual tools declare beyond their group's meta.
    *
    * A function rather than a value because the catalogue is what it is computed
@@ -291,9 +291,11 @@ export interface ToolDeps {
    * server resolves the cycle by letting the closure read a list it fills in
    * immediately afterwards; by the time anything calls this, it is complete.
    *
-   * Required for the same reason `auth` is: the sign-in tool asks for exactly
-   * this set, and a default that quietly asked for less left five tools
-   * permanently returning 403.
+   * Required for the same reason `auth` is: `session_status` reports this as
+   * the consent checklist, and a default that quietly reported less left five
+   * tools permanently returning 403 with nothing naming the missing scopes. An
+   * ordinary sign-in asks for less than this — the minimal set plus the scopes
+   * the caller names — and consent grows from there.
    */
   consentScopes: () => string[];
 }

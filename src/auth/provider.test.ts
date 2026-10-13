@@ -356,7 +356,8 @@ test('a silent refresh refused for missing consent names the scopes, not the ses
       assert.equal(err.tenantMismatch, false);
       assert.equal(err.adminScopes.length, 0);
       assert.match(err.message, /Blocked by missing consent for these scopes: User\.Read\./);
-      assert.match(err.message, /Re-run login with current --groups/);
+      assert.match(err.message, /auth_begin_login.*`scopes`/);
+      assert.match(err.message, /login --scopes User\.Read/);
       assert.match(err.message, /prompts only for what was added/);
       return true;
     },

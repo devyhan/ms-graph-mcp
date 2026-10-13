@@ -12,7 +12,7 @@ import type {
   ToolDefinition,
 } from '../contracts.js';
 import { collectTools, exposedToolNames } from '../server.js';
-import { consentScopesFor } from './groups.js';
+import { MINIMAL_LOGIN_SCOPES, consentScopesFor, loginScopesFor } from './groups.js';
 import { scopeReadingOnlyAuth } from '../auth/index.js';
 import { genericModule } from './generic.js';
 
@@ -107,8 +107,9 @@ function stubAuth(
 /**
  * Builds the module the way the server does, with the consent set the server
  * would compute — the union of the group catalogue and every tool's own extras,
- * which is what the CLI `login` asks for. The sign-in tool asking for anything
- * narrower is the bug these tests exist to hold shut.
+ * which is what `session_status` reports and `login --full` asks for. A bare
+ * sign-in asks for less than this by design (sign-in is incremental), and the
+ * tests below hold that split shut from both sides.
  */
 function toolsFor(
   over: Partial<ServerConfig> = {},
@@ -219,41 +220,61 @@ test('starting again while the browser sign-in is pending reuses the attempt', a
   assert.equal(second['startedAt'], first['startedAt']);
 });
 
-test('it asks for exactly what the CLI login asks for', async () => {
-  // The defect: this tool used to request the group scopes alone while `login`
-  // requested those PLUS the extras individual tools declare. A default install
-  // that signed in from the conversation was then left with five tools —
-  // me_get_mailbox_settings, calendar_get_schedule, calendar_find_meeting_times,
-  // files_list_shared and search_query — returning 403 for ever, and nothing
-  // suggested that signing in again would not help.
+test('a bare sign-in asks for the minimal set only', async () => {
+  // Sign-in is incremental: the first login must not demand the whole
+  // configuration up front, because one scope the tenant withholds from
+  // ordinary users would then block every tool, including the allowed ones.
+  // Consent grows as tools are first used instead.
   const auth = stubAuth();
   const tools = toolsFor({ groups: ['me', 'mail', 'calendar', 'files', 'search'] }, auth);
-  await byName(tools, 'auth_begin_login').handler({});
+  const result = (await byName(tools, 'auth_begin_login').handler({})) as Record<string, unknown>;
 
-  const expected = consentScopesFor(
-    { groups: ['me', 'mail', 'calendar', 'files', 'search'], readOnly: config.readOnly },
-    tools,
-  );
-  assert.deepEqual([...(auth.asked[0] as string[])].sort(), expected);
+  assert.deepEqual([...(auth.asked[0] as string[])].sort(), [...MINIMAL_LOGIN_SCOPES].sort());
   assert.equal(auth.flows[0], 'browser', 'the MCP tool must not fall back to device code');
-  // The per-tool extras are the whole point, so name one explicitly: a future
-  // refactor that went back to group scopes would still pass a set comparison
-  // against its own wrong answer.
+  assert.ok(!(auth.asked[0] as string[]).includes('Mail.Read'), 'no group scope unasked');
   assert.ok(
-    (auth.asked[0] as string[]).includes('MailboxSettings.Read'),
-    'a scope no group meta lists, declared by me_get_mailbox_settings',
+    !(auth.asked[0] as string[]).includes('MailboxSettings.Read'),
+    'no per-tool extra unasked',
+  );
+  assert.deepEqual(
+    [...(result['scopesRequested'] as string[])].sort(),
+    [...MINIMAL_LOGIN_SCOPES].sort(),
   );
 });
 
-test('a narrower group list still means a smaller consent prompt', async () => {
-  const narrow = stubAuth();
-  await byName(toolsFor({ groups: ['me'] }, narrow), 'auth_begin_login').handler({});
-  const wide = stubAuth();
-  await byName(toolsFor({ groups: ['me', 'mail', 'calendar'] }, wide), 'auth_begin_login').handler({});
+test('named scopes are added to the minimal set', async () => {
+  // The same rule the CLI `login --scopes` applies: minimal plus whatever the
+  // caller named, so a repeat sign-in consents to just what was added.
+  const auth = stubAuth();
+  const tools = toolsFor({ groups: ['me', 'mail'] }, auth);
+  await byName(tools, 'auth_begin_login').handler({ scopes: ['Mail.Read', ' Mail.Read '] });
 
-  assert.ok(narrow.asked[0] !== undefined && wide.asked[0] !== undefined);
-  assert.ok((wide.asked[0] as string[]).length > (narrow.asked[0] as string[]).length);
-  assert.ok(!(narrow.asked[0] as string[]).includes('Mail.Read'), 'a mail scope with no mail group');
+  assert.deepEqual(auth.asked[0], loginScopesFor(['Mail.Read']));
+  assert.ok((auth.asked[0] as string[]).includes('Mail.Read'));
+  assert.ok(!(auth.asked[0] as string[]).includes('Chat.Read'), 'nothing beyond the ask');
+});
+
+test('an empty scopes list is rejected rather than signed in bare', async () => {
+  // Silently dropping to the minimal set would report success for a consent
+  // the caller thinks it asked for. Zod rejects it before MSAL is reached.
+  const auth = stubAuth();
+  const tools = toolsFor({}, auth);
+  await assert.rejects(() => byName(tools, 'auth_begin_login').handler({ scopes: [] }));
+  assert.equal(auth.asked.length, 0, 'no interactive flow should have started');
+});
+
+test('a pending reuse reports the in-flight scopes, not the new ask', async () => {
+  // The second call reuses the running attempt, so answering with the scopes
+  // it named would describe a consent prompt that does not exist.
+  const auth = stubAuth();
+  const begin = byName(toolsFor({}, auth), 'auth_begin_login');
+
+  const first = (await begin.handler({ scopes: ['Mail.Read'] })) as Record<string, unknown>;
+  const second = (await begin.handler({ scopes: ['Chat.Read'] })) as Record<string, unknown>;
+
+  assert.equal(auth.asked.length, 1, 'only one interactive flow should be started');
+  assert.deepEqual(second['scopesRequested'], first['scopesRequested']);
+  assert.deepEqual(second['scopesRequested'], loginScopesFor(['Mail.Read']));
 });
 
 test('status moves from none to pending to signed in', async () => {

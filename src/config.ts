@@ -17,7 +17,7 @@ import { GROUPS, GROUP_NAMES, PRESET_NAMES, PRESETS, resolveGroups } from './too
 /** What the process should do once configuration is resolved. */
 export type Command =
   | { kind: 'serve' }
-  | { kind: 'login' }
+  | { kind: 'login'; scopes?: string[]; full?: boolean }
   | { kind: 'logout' }
   | { kind: 'status' }
   | { kind: 'permissions' }
@@ -385,6 +385,15 @@ const FLAGS: FlagSpec[] = [
     fallback: `${DEFAULT_AUTH_PORT} (the OS picks a free port)`,
   },
   {
+    flag: '--scopes',
+    value: '<a,b,c>',
+    summary: 'Delegated scopes for `login` to request on top of the minimal set.',
+  },
+  {
+    flag: '--full',
+    summary: 'Ask `login` for every scope the configuration may need.',
+  },
+  {
     flag: '--groups',
     env: 'MS365_MCP_GROUPS',
     value: '<a,b,c>',
@@ -535,13 +544,13 @@ function parseAuthPort(raw: string, source: string): number {
   return parsed;
 }
 
-function splitList(raw: string, source: string): string[] {
+function splitList(raw: string, source: string, what = 'group'): string[] {
   const items = raw
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item !== '');
   if (items.length === 0) {
-    throw new ConfigError(`${source} must name at least one group.`);
+    throw new ConfigError(`${source} must name at least one ${what}.`);
   }
   return items;
 }
@@ -574,10 +583,11 @@ export function buildHelpText(): string {
     '',
     'Commands:',
     '  serve         Run the MCP server on stdio (default).',
-    '  login         Sign in interactively and store the token cache.',
+    '  login         Sign in interactively and store the token cache (minimal scopes;',
+    '                widen with --scopes or --full).',
     '  logout        Clear the stored token cache.',
     '  status        Print the signed-in account and resolved configuration.',
-    '  permissions   List the delegated Graph scopes the enabled groups request.',
+    '  permissions   List the delegated Graph scopes the enabled groups may request.',
     '',
     'Options:',
   ];
@@ -627,6 +637,7 @@ export function buildHelpText(): string {
     '',
     'Examples:',
     `  microsoft-graph-mcp login${id}`,
+    `  microsoft-graph-mcp login${id} --scopes Mail.Read,Calendars.Read`,
     `  microsoft-graph-mcp${id} --preset work --read-only`,
     `  microsoft-graph-mcp${id} --groups mail,calendar --verbose`,
     `  microsoft-graph-mcp login${id} --auth-flow device`,
@@ -681,6 +692,10 @@ interface RawOptions {
   verbose?: boolean;
   authFlow?: AuthFlow;
   authPort?: number;
+  /** `--scopes`: extra scopes for `login`. Read only by the login command. */
+  loginScopes?: string[];
+  /** `--full`: `login` asks for the whole configuration instead of the minimal set. */
+  loginFull?: boolean;
 }
 
 function fromEnv(env: NodeJS.ProcessEnv): RawOptions {
@@ -857,6 +872,12 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
       case '--auth-port':
         raw.authPort = parseAuthPort(takeValue(), '--auth-port');
         break;
+      case '--scopes':
+        raw.loginScopes = splitList(takeValue(), '--scopes', 'scope');
+        break;
+      case '--full':
+        raw.loginFull = true;
+        break;
       case '--read-only':
         raw.readOnly = true;
         break;
@@ -881,7 +902,18 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
     }
   }
 
-  return toParsedConfig(buildConfig(raw, env), { kind: subcommand });
+  // Login-only arguments ride on the command, not the server config: `serve`
+  // never reads them, and putting per-invocation asks next to the session
+  // settings would suggest it does.
+  const command: Command =
+    subcommand === 'login'
+      ? {
+          kind: 'login',
+          ...(raw.loginScopes === undefined ? {} : { scopes: raw.loginScopes }),
+          ...(raw.loginFull === true ? { full: true as const } : {}),
+        }
+      : { kind: subcommand };
+  return toParsedConfig(buildConfig(raw, env), command);
 }
 
 function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {

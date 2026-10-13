@@ -114,7 +114,7 @@ export function agentStartPrompt(): {
       'to confirm. Never ask for credentials or an authorization code in the conversation.',
     '3. Orient via discover_tools (under --discovery, invoke what it names through call_tool).',
     '4. On errors, read the Hint and Blocked-by lines: they name the fix. Re-running login ' +
-      'with the current --groups prompts only for what was added.',
+      'with only the missing scopes prompts only for what was added.',
   ].join('\n');
   return { messages: [{ role: 'user', content: { type: 'text', text } }] };
 }
@@ -249,17 +249,17 @@ export function signInMessage(error: InteractionRequiredError): string {
   // Missing consent is not a missing sign-in either, but unlike the two
   // branches above, signing in again IS the fix: the session is fine, Entra
   // just has no consent on record for the scopes the detail line names —
-  // typically because --groups widened since the last login. This branch runs
-  // after the admin one because consent the tenant reserves to an
+  // typically because this tool is used for the first time since sign-in. This
+  // branch runs after the admin one because consent the tenant reserves to an
   // administrator fails the same way, and that headline must win.
   if (error.consentMissing) {
     return [
       'Blocked by missing consent — not by a missing sign-in.',
       'The stored session is fine, but Microsoft Entra has no consent on record for the scopes ' +
-        'this call asked for. Call `auth_begin_login` to sign in again with the current ' +
-        '--groups: Entra prompts only for what was added. Ask the user to finish in the ' +
-        'browser, then call `auth_login_status`. A terminal works too: ' +
-        '`npx @devyhan/ms-graph-mcp login`.',
+        'this call asked for. Call `auth_begin_login` with those scopes in `scopes` to ' +
+        'consent to just them: Entra prompts only for what was added. Ask the user to ' +
+        'finish in the browser, then call `auth_login_status`. A terminal works too: ' +
+        '`npx @devyhan/ms-graph-mcp login --scopes …`.',
       `Detail: ${error.message}`,
     ].join('\n');
   }
