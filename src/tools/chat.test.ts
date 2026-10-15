@@ -377,6 +377,39 @@ test('activity is the only array at the top level', async () => {
   assert.deepEqual(arrays, ['activity']);
 });
 
+test('message attachments project fully, so a contentUrl can feed files_parse_document', async () => {
+  const { tool } = setup({
+    chats: [chat(CHAT_A, 'Alpha', 'group')],
+    messagesByChat: {
+      [CHAT_A]: [
+        {
+          ...message('a-doc', '2026-10-10T10:00:00Z', 'Ada', 'see attached'),
+          attachments: [
+            {
+              id: 'att-1',
+              name: 'q3.docx',
+              contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+              contentUrl: 'https://tenant.sharepoint.com/:w:/g/x',
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const result = (await tool('chat_recent_activity').handler({
+    messagesPerChat: 2,
+  })) as unknown as ActivityResult;
+
+  assert.deepEqual(result.activity[0]?.['attachments'], [
+    {
+      id: 'att-1',
+      name: 'q3.docx',
+      contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      contentUrl: 'https://tenant.sharepoint.com/:w:/g/x',
+    },
+  ]);
+});
+
 test('the result still parses as JSON when the serialiser has to cut it', async () => {
   // Same rule as mail_fetch_thread: serializeResult shortens the largest
   // top-level array, so a second array would risk a character-cut fragment.

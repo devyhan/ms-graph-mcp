@@ -116,7 +116,7 @@ interface LastMessagePreviewPayload {
     application?: { displayName?: string | null } | null;
   } | null;
   body?: { content?: string | null; contentType?: string | null } | null;
-  attachments?: unknown[] | null;
+  attachments?: ChatAttachmentPayload[] | null;
 }
 
 interface ChatMessagePayload {
@@ -131,7 +131,14 @@ interface ChatMessagePayload {
     application?: { displayName?: string | null } | null;
   } | null;
   body?: { content?: string | null; contentType?: string | null } | null;
-  attachments?: unknown[] | null;
+  attachments?: ChatAttachmentPayload[] | null;
+}
+
+interface ChatAttachmentPayload {
+  id?: string | null;
+  name?: string | null;
+  contentType?: string | null;
+  contentUrl?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,12 +216,28 @@ function projectChat(chat: ChatPayload, includeMembers: boolean): Record<string,
   };
 }
 
+/**
+ * Attachment references, fully projected. The `contentUrl` is usually a
+ * SharePoint sharing link, which `files_parse_document` accepts as `shareUrl`
+ * — that is how a referenced document reaches the model as parsed text.
+ */
+function projectAttachments(
+  attachments: ChatAttachmentPayload[] | null | undefined,
+): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(attachments) || attachments.length === 0) return undefined;
+  return attachments.map((attachment) => ({
+    id: attachment.id ?? undefined,
+    name: attachment.name ?? undefined,
+    contentType: attachment.contentType ?? undefined,
+    contentUrl: attachment.contentUrl ?? undefined,
+  }));
+}
+
 function projectMessage(msg: ChatMessagePayload): Record<string, unknown> {
   const body = msg.body;
   const raw = body?.content ?? '';
   // Teams stores nearly every message as HTML even when the user typed plain text.
   const text = body?.contentType === 'html' ? stripHtml(raw) : raw.trim();
-  const attachments = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
   const messageType = msg.messageType ?? undefined;
   const importance = msg.importance ?? undefined;
 
@@ -224,7 +247,7 @@ function projectMessage(msg: ChatMessagePayload): Record<string, unknown> {
     // `from` is null on system event messages (joins, leaves, meeting start).
     from: msg.from?.user?.displayName ?? msg.from?.application?.displayName ?? undefined,
     body: text.length > 0 ? truncateText(text, BODY_CHARS) : undefined,
-    attachments: attachments > 0 ? attachments : undefined,
+    attachments: projectAttachments(msg.attachments),
     // Only the non-default values are worth a key, so rows stay short.
     messageType: messageType !== undefined && messageType !== 'message' ? messageType : undefined,
     importance: importance !== undefined && importance !== 'normal' ? importance : undefined,
@@ -287,7 +310,6 @@ function projectHistoryMessage(msg: ChatMessagePayload, bodyChars: number): Reco
   const body = msg.body;
   const raw = body?.content ?? '';
   const text = body?.contentType === 'html' ? stripHtml(raw) : raw.trim();
-  const attachments = Array.isArray(msg.attachments) ? msg.attachments.length : 0;
   const messageType = msg.messageType ?? undefined;
 
   return {
@@ -297,8 +319,9 @@ function projectHistoryMessage(msg: ChatMessagePayload, bodyChars: number): Reco
     // bodyChars=0 timeline that distinction carries most of the row's meaning.
     from: msg.from?.user?.displayName ?? msg.from?.application?.displayName ?? null,
     body: bodyChars > 0 && text.length > 0 ? truncateText(text, bodyChars) : undefined,
-    // The count only. Attachment contents are a separate fetch and would swamp a walk.
-    attachments: attachments > 0 ? attachments : undefined,
+    // References only — four short fields each. Attachment contents are a
+    // separate fetch (files_parse_document on the contentUrl) and would swamp a walk.
+    attachments: projectAttachments(msg.attachments),
     // Elided when ordinary, which is nearly every row here, so a present
     // messageType always means an event row.
     messageType: messageType !== undefined && messageType !== 'message' ? messageType : undefined,
@@ -660,7 +683,8 @@ export const chatModule: ToolModule = {
         description:
           'Reads recent messages from one Teams chat, newest first. Each row is a compact ' +
           'projection: id, createdDateTime, the sender display name, the body stripped of HTML ' +
-          `and truncated to ${BODY_CHARS} characters, and the number of attachments. Returns up ` +
+          `and truncated to ${BODY_CHARS} characters, and attachment references (id, name, ` +
+          'contentType, contentUrl). Returns up ' +
           'to `top` messages (default 20) plus a count and a nextLink when older messages exist. ' +
           'System event messages (someone joined or left, a meeting started) carry no body and no ' +
           'sender — they are marked with messageType. Deleted messages still appear, flagged ' +
@@ -759,7 +783,8 @@ export const chatModule: ToolModule = {
           'ask only for what you will read. Bound the window with `since` (stop once messages ' +
           'older than this are reached) and `until` (start below this timestamp). Each row is id, ' +
           'createdDateTime, the sender display name — null on system events, the app name on bot ' +
-          'posts — the body stripped of HTML and truncated to bodyChars, and an attachment count; ' +
+          'posts — the body stripped of HTML and truncated to bodyChars, and attachment references ' +
+          '(id, name, contentType, contentUrl); ' +
           'set bodyChars to 0 for a bodyless timeline. Deleted messages still appear, flagged ' +
           'deleted with the body gone. Raw HTML, reactions, @mention targets and attachment ' +
           'contents are never returned, and there is no text search on this collection. `range` ' +

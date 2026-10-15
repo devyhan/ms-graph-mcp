@@ -135,7 +135,7 @@ Either way, check it worked:
 npx @devyhan/ms-graph-mcp status
 ```
 
-`status` prints the application ID in use and where it came from, the account it resolved, and the scopes this configuration may request. Then point an MCP client at the server.
+`status` prints the application ID in use and where it came from, the account it resolved with a `(token usable)` / `(token unusable)` suffix, the mode/groups/tools/cache lines, and the scopes this configuration may request. Then point an MCP client at the server.
 
 ### As a Claude Code plugin
 
@@ -283,6 +283,8 @@ If you are an AI assistant working with this server, paste the block below into 
 5. For scope and consent questions see Consent, Search permissions and Sign-in errors in this README.
 ```
 
+The server also offers an `agent_start` prompt with the same steps, and sends every client the same orientation as a one-paragraph server instruction on connect.
+
 ## Which application am I signing in to
 
 **A shared application published by this project.** Unless you override it, the client ID the server presents to Entra is a multi-tenant registration this project publishes — the same one every other user of this package signs in with. The server picks one in this order, and stops at the first that is set:
@@ -314,7 +316,7 @@ If you are an AI assistant working with this server, paste the block below into 
 
 **Personal Microsoft accounts** consent for themselves — no administrator, no tenant policy. In exchange, a large part of the catalogue is unavailable to them at any consent level: the Teams chat and channel APIs are documented as not supported for delegated personal-account access, and Planner, SharePoint, the directory tools and Intune do not exist for a personal account at all. Use a narrow group set, and sign in against the personal-account authority with `--tenant-id consumers`; a refresh token issued through the `common` authority is rejected at its first refresh.
 
-**Sign-in is incremental.** A bare `login` asks only for the minimal set (`User.Read`, `offline_access`), and consent grows as tools are first used: when a call fails for missing consent, its error names the scopes, and signing in again with just those prompts only for what was added. From a conversation, call `auth_begin_login` with `scopes`; from a terminal:
+**Sign-in is incremental.** A bare `login` asks only for the minimal set (`User.Read`, `offline_access`), and consent grows as tools are first used: when a call fails for missing consent, its error names the scopes, and signing in again with just those prompts only for what was added. From a conversation, call `auth_begin_login` with `scopes` (or `mode: "full"` for everything grantable up front); from a terminal:
 
 ```
 npx @devyhan/ms-graph-mcp login
@@ -403,7 +405,7 @@ Both sign-in flows are OAuth 2.0, and both end with the same delegated access to
 
 **`getToken` never prompts.** In `serve` mode the server refreshes access tokens silently and does nothing else. When the refresh token has expired, been revoked, or no longer covers a scope, the data tool returns an error rather than unexpectedly opening a browser and holding that request open. Interactive authentication starts only when the caller explicitly invokes `auth_begin_login`; that tool launches the browser in the background without writing to the MCP-owned stdout stream.
 
-**Signing in from a tool call.** A sign-in the caller asked for is a different thing from one that starts itself mid-request, and `auth_begin_login` is that first thing. It explicitly starts the browser grant in the background, returns while the user completes the Microsoft page, and `auth_login_status` reports when the redirect has been exchanged for a session. Neither tool ever returns a token, both survive `--read-only` — signing in changes nothing in the tenant — and both stay visible under `--discovery`, because a caller with no session cannot invoke a tool it has not discovered. The tool and CLI paths ask for exactly the same scopes and leave the session in the same encrypted cache, so you can start in the conversation and carry on from the terminal or the other way round.
+**Signing in from a tool call.** A sign-in the caller asked for is a different thing from one that starts itself mid-request, and `auth_begin_login` is that first thing. It explicitly starts the browser grant in the background, returns while the user completes the Microsoft page, and `auth_login_status` reports when the redirect has been exchanged for a session. `session_status` probes the resulting session. None of the three ever returns a token, all three survive `--read-only` — signing in changes nothing in the tenant — and all three stay visible under `--discovery`, because a caller with no session cannot invoke a tool it has not discovered. The tool and CLI paths ask for exactly the same scopes and leave the session in the same encrypted cache, so you can start in the conversation and carry on from the terminal or the other way round.
 
 **This is a local server.** It does not implement the MCP authorization specification, and per that specification it should not: the spec covers HTTP transports and directs stdio servers to take credentials from the environment instead. So the server obtains user credentials itself, as an ordinary public OAuth client, and the MCP client is not involved in authentication at all. A remote HTTP mode — where the MCP client performs OAuth against Entra and the server exchanges that token for a Graph token on the user's behalf — is not implemented.
 
@@ -440,7 +442,7 @@ The server sorts these into three kinds, and only one of them falls back.
 
 ## Tools
 
-104 tools across 14 groups. `--read-only` removes every write tool, leaving 73. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
+111 tools across 14 groups. `--read-only` removes every write tool, leaving 80. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
 
 ### Tool groups
 
@@ -449,19 +451,19 @@ Tools are grouped by product area. Enable only the groups you need — fewer too
 | Group | Product | Delegated scopes | Admin consent | Tools |
 | --- | --- | --- | --- | --- |
 | `me` | Entra ID profile, Outlook mailbox settings | `User.Read`, `MailboxSettings.Read` | No | 2 |
-| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 13 |
+| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 14 |
 | `calendar` | Outlook calendar | `Calendars.Read`, `Calendars.Read.Shared`, `Calendars.ReadWrite` | No | 9 |
-| `files` | OneDrive | `Files.Read`, `Files.Read.All`, `Files.ReadWrite` | No | 10 |
+| `files` | OneDrive | `Files.Read`, `Files.Read.All`, `Files.ReadWrite`, `Mail.Read` ² | No | 13 |
 | `todo` | Microsoft To Do | `Tasks.Read`, `Tasks.ReadWrite` | No | 8 |
 | `planner` | Microsoft Planner | `Tasks.Read`, `Tasks.ReadWrite` | No | 9 |
 | `contacts` | Outlook contacts | `Contacts.Read`, `Contacts.ReadWrite` | No | 6 |
-| `chat` | Teams one-to-one and group chats | `Chat.Read`, `Chat.ReadWrite` | No | 6 |
+| `chat` | Teams one-to-one and group chats | `Chat.Read`, `Chat.ReadWrite` | No | 7 |
 | `sharepoint` | SharePoint sites, libraries, lists | `Sites.Read.All`, `Sites.ReadWrite.All` | No | 11 |
 | `search` | Microsoft Search across mail, files, sites | `Mail.Read`, `Files.Read`, `Sites.Read.All`, `Calendars.Read`, `Chat.Read` | No¹ | 1 |
-| `teams` | Teams teams, channels, channel messages | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `TeamMember.Read.All` | **Yes** | 9 |
+| `teams` | Teams teams, channels, channel messages | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`, `ChannelMessage.Send`, `TeamMember.Read.All` | **Yes** | 10 |
 | `directory` | Entra ID user and group lookups | `User.Read.All`, `Group.Read.All` | **Yes** | 9 |
 | `intune` | Intune managed device inventory | `DeviceManagementManagedDevices.Read.All` | **Yes** | 6 |
-| `generic` | Signing in, any Graph endpoint, introspection | reuses the union of the above | No | 5 |
+| `generic` | Signing in, any Graph endpoint, introspection | reuses the union of the above | No | 6 |
 
 `offline_access` and `User.Read` are always requested: the first keeps refresh tokens working, the second identifies the account.
 
@@ -471,7 +473,9 @@ The **Admin consent** column is Microsoft's own classification of each permissio
 
 ¹ `search` itself needs no administrator, but one thing it can search does: the `chatMessage` index additionally requires `ChannelMessage.Read.All`, which belongs to `teams`. See [Search permissions](#search-permissions).
 
-The `generic` group is always on and cannot be selected or removed. It holds `graph_request` (the escape hatch for endpoints no other tool covers), `graph_schema` (fetches one item from a path and reports its property names and types), and `graph_list_permissions` (reports the enabled groups, their scopes, and the signed-in account).
+² `Mail.Read` rides on the one files tool that reads mail attachments, `files_parse_document`. Consent is incremental: a drive-only caller never pays for it.
+
+The `generic` group is always on and cannot be selected or removed. It holds `auth_begin_login` and `auth_login_status` (the sign-in pair), `session_status` (the session probe), `graph_request` (the escape hatch for endpoints no other tool covers), `graph_schema` (fetches one item from a path and reports its property names and types), and `graph_list_permissions` (reports the enabled groups, their scopes, and the signed-in account).
 
 ### Tool reference
 
@@ -486,7 +490,7 @@ The `generic` group is always on and cannot be selected or removed. It holds `gr
 </details>
 
 <details>
-<summary><b><code>mail</code></b> — Mail: 13 tools, 7 of them writes</summary>
+<summary><b><code>mail</code></b> — Mail: 14 tools, 7 of them writes</summary>
 
 Bodies are the expensive part of a mailbox, so list calls return `bodyPreview` only and `mail_get_message` fetches one message in full, HTML stripped to text by default.
 
@@ -502,6 +506,7 @@ A reply chain is the expensive case, because Outlook quotes itself: message N ca
 | `mail_fetch_thread` |  | Reads a whole reply chain in one call, oldest-first, folding text the messages repeat at each other into markers like `[quoted from #3]`. Give it any message id of the thread, or an explicit list of ids. | `fromMessageId`, `ids`, `maxMessages`, `maxBodyChars`, `totalBodyChars`, `fold`, `foldLinks` |
 | `mail_list_folders` |  | Lists the top-level Outlook mail folders with their ids, unread counts and total counts, 50 per call by default. | `top`, `includeChildren` |
 | `mail_list_attachments` |  | Lists attachment metadata for one message — id, name, contentType, size in bytes, whether it is inline, and its kind (file, item, or reference) — 20 per call by default. | **`id`**, `top` |
+| `mail_get_attachment_content` |  | Returns one attachment's content: text for text-like files under 1 MB, base64 otherwise, or the sourceUrl for a reference attachment. | **`id`**, **`attachmentId`**, `maxChars` |
 | `mail_send` | **write** | Sends a message immediately from the signed-in mailbox — there is no undo and no confirmation step, so confirm the recipients and text with the user first. | **`to`**, **`subject`**, **`body`**, `cc`, `bcc`, `contentType`, `saveToSentItems` |
 | `mail_create_draft` | write | Creates an unsent draft in the Drafts folder and returns its id and webLink. | `to`, **`subject`**, **`body`**, `cc`, `bcc`, `contentType` |
 | `mail_reply` | **write** | Sends a reply to an existing message immediately — it does not create a draft, and there is no undo, so confirm the text with the user first. | **`id`**, **`comment`**, `replyAll` |
@@ -532,9 +537,11 @@ A reply chain is the expensive case, because Outlook quotes itself: message N ca
 </details>
 
 <details>
-<summary><b><code>files</code></b> — Files: 10 tools, 4 of them writes</summary>
+<summary><b><code>files</code></b> — Files: 13 tools, 4 of them writes</summary>
 
 Path-addressed calls encode each segment separately, so spaces and `&` in filenames work. `files_read_text` refuses binary types by extension before downloading, and no tool returns `@microsoft.graph.downloadUrl`, which is a pre-authenticated link to the file contents.
+
+Documents referenced from elsewhere — a Teams attachment `contentUrl`, a channel Files tab, a mail attachment — reach the model through `files_parse_document`, which extracts `.docx`/`.xlsx`/`.pptx`/`.pdf` as unit rows (sections/sheets/slides/pages) with a manifest. It is backed by five pure-JS libraries, the only new runtime dependencies: mammoth (structure-aware docx), exceljs (streaming xlsx; the frozen `xlsx` package has known CVEs), jszip plus fast-xml-parser (ordered pptx slides), and pdfjs-dist (positioned PDF text).
 
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
@@ -544,6 +551,9 @@ Path-addressed calls encode each segment separately, so spaces and `&` in filena
 | `files_list_recent` |  | Lists files the signed-in user recently opened or edited, most recent first, with count and nextLink. | `top` |
 | `files_list_shared` |  | Lists files and folders other people have shared with the signed-in user, with count and nextLink. | `top` |
 | `files_read_text` |  | Returns the contents of a text-like OneDrive file (plain text, Markdown, CSV, JSON, XML, source code, config) as a string, truncated to maxChars, which defaults to 20000. | **`itemId`**, `maxChars` |
+| `files_resolve_share` |  | Resolves a OneDrive/SharePoint sharing link to the drive address behind it: driveId plus itemId, name, kind, size, mime type and webUrl. | **`shareUrl`** |
+| `files_get_drive_item` |  | Reads one file or folder in any reachable drive (shared files, channel folders), returning the same detail as files_get_item. | **`driveId`**, **`itemId`** |
+| `files_parse_document` |  | Extracts a .docx, .xlsx, .pptx or .pdf as unit rows (sections/sheets/slides/pages) plus a manifest with unitCount, per-unit truncation flags and a cursor. | `shareUrl`, `driveId`+`itemId`, `messageId`+`attachmentId`, `unitOffset`, `unitLimit`, `maxCharsPerUnit`, `cursor` |
 | `files_create_folder` | write | Creates a folder in the signed-in user's OneDrive and returns the created item. | **`name`**, `parentItemId`, `parentPath` |
 | `files_upload_text` | write | Writes a text file to the given path in the signed-in user's OneDrive and returns the stored item. | **`path`**, **`content`** |
 | `files_delete` | **write** | Deletes a file or folder from the signed-in user's OneDrive. | **`itemId`** |
@@ -601,7 +611,7 @@ Planner requires an `If-Match` etag on every update and delete. The tools fetch 
 </details>
 
 <details>
-<summary><b><code>chat</code></b> — Chat: 6 tools, 1 of them writes</summary>
+<summary><b><code>chat</code></b> — Chat: 7 tools, 1 of them writes</summary>
 
 Graph offers no `$select` and no date filter on chat messages, so projection happens here and date windows are applied while paging. `chat_fetch_history` is the one to reach for beyond a single page.
 
@@ -613,6 +623,7 @@ Graph offers no `$select` and no date filter on chat messages, so projection hap
 | `chat_list_members` |  | Lists everyone in one Teams chat: the per-chat membership id, display name, email, directory user id, and roles (an owner of a group chat has ["owner"]; ordinary members have none). | **`chatId`** |
 | `chat_send_message` | **write** | Posts a message to a Teams chat as the signed-in user. | **`chatId`**, **`content`**, `contentType` |
 | `chat_fetch_history` |  | Reads a long run of one Teams chat, newest first, paging automatically so you do not have to follow nextLink yourself. | **`chatId`**, `since`, `until`, `maxMessages`, `bodyChars`, `includeSystem`, `cursor` |
+| `chat_recent_activity` |  | Lists the most-active Teams chats first with a last-message preview each, server-ordered in one request; set messagesPerChat above 1 to include recent messages per chat via one batched fetch. | `chats`, `messagesPerChat`, `bodyChars`, `includeSystem` |
 
 </details>
 
@@ -645,7 +656,7 @@ Graph offers no `$select` and no date filter on chat messages, so projection hap
 </details>
 
 <details>
-<summary><b><code>teams</code></b> — Teams: 9 tools, 1 of them writes</summary>
+<summary><b><code>teams</code></b> — Teams: 10 tools, 1 of them writes</summary>
 
 Channel messages have an even narrower query surface than chats: no `$filter`, no `$orderby`, and an order based on the reply chain rather than creation time. `teams_fetch_channel_history` filters client-side for that reason and says so.
 
@@ -654,6 +665,7 @@ Channel messages have an even narrower query surface than chats: no `$filter`, n
 | `teams_list_joined` |  | Lists the Microsoft Teams teams the signed-in user is a member of, returning id, displayName, description, visibility and archived state. | none |
 | `teams_list_channels` |  | Lists the channels of one team, returning id, displayName, description, membershipType and webUrl for each. | **`teamId`**, `membershipType` |
 | `teams_get_channel` |  | Returns one channel: displayName, description, membershipType, creation time, the channel email address (empty unless the channel has one provisioned) and the deep link webUrl. | **`teamId`**, **`channelId`** |
+| `teams_get_channel_files_folder` |  | Returns the SharePoint folder behind a channel's Files tab as a drive address (driveId plus itemId) for files_get_drive_item and files_parse_document. | **`teamId`**, **`channelId`** |
 | `teams_list_channel_messages` |  | Lists the top-level messages of a channel, newest first, with sender, timestamp, plain-text body (HTML stripped and truncated to `bodyChars`) and attachment, mention and reaction counts. | **`teamId`**, **`channelId`**, `top`, `bodyChars` |
 | `teams_get_channel_message` |  | Returns one channel message in full: sender, timestamps, plain-text body truncated to `bodyChars`, attachment names, mention text and reaction types. | **`teamId`**, **`channelId`**, **`messageId`**, `bodyChars` |
 | `teams_list_message_replies` |  | Lists the replies to one top-level channel message, newest first, with the same compact projection as teams_list_channel_messages. | **`teamId`**, **`channelId`**, **`messageId`**, `top`, `bodyChars` |
@@ -697,19 +709,28 @@ Advanced queries against the directory need the `ConsistencyLevel: eventual` hea
 </details>
 
 <details>
-<summary><b><code>graph</code></b> — Generic: 5 tools, 1 of them writes</summary>
+<summary><b><code>generic</code></b> — Generic: 6 tools, none of them writes</summary>
 
 Always enabled and not selectable. Signing in lives here because it is needed before anything else works, and `graph_request` is the escape hatch for endpoints no purpose-built tool covers.
 
 | Tool | | What it does | Arguments |
 | --- | --- | --- | --- |
-| `auth_begin_login` |  | Opens the system browser for OAuth 2.0 authorization code + PKCE sign-in and returns immediately. Reuses an in-progress attempt instead of opening another window. No token is ever returned. | none |
+| `auth_begin_login` |  | Opens the system browser for OAuth 2.0 authorization code + PKCE sign-in and returns immediately. Reuses an in-progress attempt instead of opening another window. Pass `scopes` to grow consent incrementally, `mode: "full"` to consent up front to everything grantable. No token is ever returned. | `scopes`, `mode` |
 | `auth_login_status` |  | Reports where a browser sign-in has got to: pending, signedIn, failed or none. Never returns a token. | none |
-| `graph_request` | **write** | Sends an arbitrary request to Microsoft Graph and returns the raw JSON response. | **`path`**, `method`, `version`, `query`, `body`, `maxPages` |
+| `session_status` |  | Unified session and consent probe: cached account plus whether the stored session still mints tokens and live GET /me reachability. Call once first. | none |
+| `graph_request` | write | Sends an arbitrary request to Microsoft Graph and returns the raw JSON response. GET is always available; the write methods need `--allow-generic-write` and are refused under `--read-only`. | **`path`**, `method`, `version`, `query`, `body`, `maxPages` |
 | `graph_schema` |  | Fetches one item from a Graph path ($top=1) and reports the property names it carries with their JSON types, plus the @odata.context that names the resource type. | **`entityPath`**, `version` |
 | `graph_list_permissions` |  | Reports how this server is configured: which tool groups are enabled, the delegated Microsoft Graph scopes each one uses, which of them need a tenant administrator to consent, whether write tools are suppressed, and the signed-in account. | none |
 
 </details>
+
+### Document parsing
+
+`files_parse_document` extracts `.docx`, `.xlsx`, `.pptx` and `.pdf` from a sharing link, a drive address, or a mail attachment, as unit rows (sections/sheets/slides/pages) plus a manifest with a cursor for paging. Caps: 16 MiB per download, 50 PDF pages, 100,000 spreadsheet rows across all sheets (100 columns each); overruns stop with a warning, not a silent cut. Non-goals: legacy `.doc`/`.ppt`/`.xls` are refused rather than converted, scanned or image-only PDFs are refused rather than OCR'd, password-protected files are refused rather than unlocked, and images and graphics inside documents are not extracted.
+
+### TOON output
+
+`--output toon` serialises tool results as Token-Oriented Object Notation instead of indented JSON: uniform arrays become one header plus bare data rows, which spends far less of the context budget on repeated keys. The encoder implements the subset tool results need (objects, nested arrays, scalar quoting with the spec's escape set) and survives hostile values the same way JSON does — cycles, BigInts and Errors never throw. It deliberately omits keyed-tabular form, non-comma delimiters and tab indentation.
 
 ### Presets
 
@@ -763,7 +784,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 
 `MS365_MCP_AUTH_FLOW=interactive`, the undocumented value that used to select the browser flow, is still accepted as an alias for `browser`.
 
-`--discovery` is worth knowing about: with every group enabled the server exposes 104 tools, and 104 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees five tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, `graph_list_permissions` reports the configuration, and `auth_begin_login` with `auth_login_status` sign you in. The last two are exposed here deliberately: a caller with no session cannot reach a tool through `call_tool` that it has not discovered yet, and signing in is the first thing such a caller needs. The model pays for a tool's schema only when it actually calls it.
+`--discovery` is worth knowing about: with every group enabled the server exposes 111 tools, and 111 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees six tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, `graph_list_permissions` reports the configuration, `session_status` probes the session, and `auth_begin_login` with `auth_login_status` sign you in. The last three are exposed here deliberately: a caller with no session cannot reach a tool through `call_tool` that it has not discovered yet, and signing in is the first thing such a caller needs. The model pays for a tool's schema only when it actually calls it.
 
 ## Security
 

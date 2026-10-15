@@ -104,6 +104,8 @@ interface GraphAttachment {
   size?: number | null;
   isInline?: boolean | null;
   lastModifiedDateTime?: string | null;
+  contentBytes?: string | null;
+  sourceUrl?: string | null;
   '@odata.type'?: string | null;
 }
 
@@ -547,6 +549,34 @@ const listAttachmentsInput = z.object({
     .default(20)
     .describe('How many attachments to return. Defaults to 20.'),
 });
+
+const getAttachmentContentInput = z.object({
+  id: z.string().min(1).describe('The message id, as returned by mail_list_messages.'),
+  attachmentId: z.string().min(1).describe('The attachment id, as returned by mail_list_attachments.'),
+  maxChars: z
+    .number()
+    .int()
+    .min(200)
+    .max(200_000)
+    .default(20_000)
+    .describe(
+      'Maximum characters of text (or base64) to return. Defaults to 20000; longer content is cut with a marker.',
+    ),
+});
+
+/** Largest attachment inlined as content; bigger ones go through files_parse_document ($value). */
+const MAX_INLINE_ATTACHMENT_BYTES = 1_000_000;
+
+const TEXT_ATTACHMENT_MIME = /^(text\/|application\/(json|xml|csv|yaml|toml|javascript|ecmascript|x-sh|x-shellscript|sql|graphql|x-yaml|x-ndjson))/i;
+const TEXT_ATTACHMENT_EXT = /\.(txt|text|md|markdown|csv|tsv|json|jsonl|xml|yaml|yml|log|html|htm|css|js|mjs|ts|tsx|py|rb|go|rs|java|c|h|cpp|cs|swift|php|sh|sql|ini|cfg|conf|env)$/i;
+
+/** Mime type wins; the extension is the fallback for `application/octet-stream` names. */
+function isTextAttachment(contentType: string, name: string): boolean {
+  const mime = contentType.split(';')[0]?.trim() ?? '';
+  if (mime !== '' && TEXT_ATTACHMENT_MIME.test(mime)) return true;
+  if (mime !== '' && !mime.endsWith('octet-stream')) return false;
+  return TEXT_ATTACHMENT_EXT.test(name);
+}
 
 const draftFields = {
   subject: z.string().max(255).describe('Subject line.'),
@@ -1262,6 +1292,101 @@ export const mailModule: ToolModule = {
               lastModifiedDateTime: attachment.lastModifiedDateTime ?? undefined,
             })),
             nextLink: res.nextLink,
+          };
+        },
+      },
+      {
+        name: 'mail_get_attachment_content',
+        title: 'Get attachment content',
+        description:
+          'Returns the content of one message attachment. A file attachment under 1 MB comes back ' +
+          'as text when it is text-like, or as base64 otherwise; larger files are refused with a ' +
+          'pointer at files_parse_document, which reads them through $value instead. A reference ' +
+          'attachment (a link, not a file) comes back as its sourceUrl — pass that as shareUrl ' +
+          'to files_resolve_share or files_parse_document. Check kind on mail_list_attachments first.',
+        inputSchema: getAttachmentContentInput,
+        scopes: READ_SCOPES,
+        group: GROUP.name,
+        handler: async (args) => {
+          const { id, attachmentId, maxChars } = getAttachmentContentInput.parse(args);
+          const base = `/me/messages/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`;
+
+          const meta = await graph.request<GraphAttachment>({
+            path: base,
+            method: 'GET',
+            query: buildQuery({ select: ['id', 'name', 'contentType', 'size', 'isInline', 'sourceUrl'] }),
+            scopes: READ_SCOPES,
+          });
+          const item = meta.data ?? {};
+          const name = item.name ?? attachmentId;
+          // @odata.type rides along with any $select (OData control info), so this holds (verified live).
+          const kind = (item['@odata.type'] ?? '').replace('#microsoft.graph.', '') || undefined;
+
+          if (kind === 'referenceAttachment') {
+            return {
+              messageId: id,
+              attachmentId: item.id ?? attachmentId,
+              name,
+              kind,
+              sourceUrl: item.sourceUrl ?? undefined,
+              note:
+                'This attachment is a link, not a file. Pass sourceUrl as shareUrl to ' +
+                'files_parse_document (or files_resolve_share) to read the document behind it.',
+            };
+          }
+          if (kind !== undefined && kind !== 'fileAttachment') {
+            throw new Error(
+              `"${name}" is an Outlook ${kind} attachment, not a file, so it has no content to return.`,
+            );
+          }
+
+          const size = typeof item.size === 'number' ? item.size : undefined;
+          if (size !== undefined && size > MAX_INLINE_ATTACHMENT_BYTES) {
+            throw new Error(
+              `"${name}" is ${(size / 1048576).toFixed(1)} MiB; attachments over ` +
+                `${MAX_INLINE_ATTACHMENT_BYTES / 1048576} MiB are not inlined here. For a document, use ` +
+                'files_parse_document with messageId+attachmentId; for anything else, download it from Outlook.',
+            );
+          }
+
+          const full = await graph.request<GraphAttachment>({
+            path: base,
+            method: 'GET',
+            query: buildQuery({ select: ['contentBytes'] }),
+            scopes: READ_SCOPES,
+          });
+          const encoded = full.data?.contentBytes ?? '';
+          let bytes: Buffer;
+          try {
+            bytes = Buffer.from(encoded, 'base64');
+          } catch {
+            throw new Error(`"${name}" came back with undecodable contentBytes.`);
+          }
+          const contentType = item.contentType ?? '';
+          if (isTextAttachment(contentType, name)) {
+            return {
+              messageId: id,
+              attachmentId: item.id ?? attachmentId,
+              name,
+              contentType: contentType || undefined,
+              size,
+              kind: 'fileAttachment',
+              text: truncateText(new TextDecoder().decode(bytes), maxChars),
+            };
+          }
+          const b64 = bytes.toString('base64');
+          return {
+            messageId: id,
+            attachmentId: item.id ?? attachmentId,
+            name,
+            contentType: contentType || undefined,
+            size,
+            kind: 'fileAttachment',
+            encoding: 'base64',
+            contentBytes: truncateText(b64, maxChars),
+            note:
+              'Binary content. For .docx/.xlsx/.pptx/.pdf, files_parse_document with ' +
+              'messageId+attachmentId returns parsed text instead of base64.',
           };
         },
       },

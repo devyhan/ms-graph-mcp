@@ -56,6 +56,14 @@ const MESSAGE_SEND_SCOPES = [groupScope('ChannelMessage.Send')];
  */
 const TEAM_MEMBER_SCOPES = ['TeamMember.Read.All'];
 
+/**
+ * The `filesFolder` call itself is a channel read, so it carries the channel
+ * scope only — least privilege per tool, as elsewhere in this group. The
+ * drive reads that follow (files_get_drive_item, files_parse_document) ask
+ * for Files.Read.All themselves when they run.
+ */
+const FILES_FOLDER_SCOPES = [...CHANNEL_SCOPES];
+
 // ---------------------------------------------------------------------------
 // Graph payload shapes (only the parts these tools project)
 // ---------------------------------------------------------------------------
@@ -140,6 +148,15 @@ interface ConversationMemberPayload {
   email?: string | null;
   tenantId?: string | null;
   visibleHistoryStartDateTime?: string | null;
+}
+
+/** The channel's root folder, as `GET .../filesFolder` returns it: a driveItem. */
+interface FilesFolderPayload {
+  id?: string | null;
+  name?: string | null;
+  webUrl?: string | null;
+  folder?: { childCount?: number | null } | null;
+  parentReference?: { driveId?: string | null; path?: string | null } | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +554,8 @@ const fetchChannelHistoryInput = z.object({
     ),
 });
 
+const filesFolderInput = z.object({ teamId, channelId });
+
 const listMembersInput = z.object({
   teamId,
   top: z
@@ -911,6 +930,45 @@ export const teamsModule: ToolModule = {
               historyRoot(message, input.bodyChars, input.includeReplies),
             ),
             cursor: walk.nextLink,
+          };
+        },
+      },
+      {
+        name: 'teams_get_channel_files_folder',
+        title: "Get a channel's files folder",
+        description:
+          'Returns the SharePoint folder behind a channel\'s Files tab as a drive address: ' +
+          'driveId plus itemId, folder name, child count and webUrl. The driveId/itemId pair is ' +
+          'what files_get_drive_item and files_parse_document take, so this is the bridge from ' +
+          'a channel to its documents. Requires tenant admin consent (Channel.ReadBasic.All). ' +
+          'The follow-on drive reads need Files.Read.All, asked for by the files tools themselves.',
+        inputSchema: filesFolderInput,
+        scopes: FILES_FOLDER_SCOPES,
+        group: GROUP.name,
+        handler: async (args) => {
+          const input = filesFolderInput.parse(args);
+          const res = await graph.request<FilesFolderPayload>({
+            path: `/teams/${segment(input.teamId)}/channels/${segment(input.channelId)}/filesFolder`,
+            method: 'GET',
+            scopes: FILES_FOLDER_SCOPES,
+          });
+          const folder = res.data ?? {};
+          const driveId = folder.parentReference?.driveId ?? undefined;
+          const itemId = folder.id ?? undefined;
+          if (driveId === undefined || itemId === undefined) {
+            throw new Error(
+              'Graph returned the files folder without its drive address. ' +
+                'The channel may have no provisioned Files tab yet.',
+            );
+          }
+          return {
+            teamId: input.teamId,
+            channelId: input.channelId,
+            driveId,
+            itemId,
+            name: folder.name ?? undefined,
+            childCount: folder.folder?.childCount ?? undefined,
+            webUrl: folder.webUrl ?? undefined,
           };
         },
       },

@@ -610,3 +610,97 @@ test('mail_get_message leaves format:"html" untouched', async () => {
   assert.equal(result['bodyRendering'], 'html');
   assert.ok(String(result['body'] ?? '').includes(TRACKING_LINK));
 });
+
+// ---------------------------------------------------------------------------
+// mail_get_attachment_content
+// ---------------------------------------------------------------------------
+
+function attachmentTool(attachments: Record<string, Record<string, unknown>>): ToolDefinition {
+  const graph: GraphClient = {
+    async request<T = unknown>(opts: GraphRequestOptions): Promise<GraphResponse<T>> {
+      const match = /^\/me\/messages\/([^/]+)\/attachments\/([^/]+)$/.exec(opts.path);
+      assert.ok(match !== null, `stub has no route for ${opts.path}`);
+      const attachment = attachments[match[2] as string];
+      assert.ok(attachment !== undefined, `stub has no attachment ${match[2]}`);
+      const select = String(opts.query?.['$select'] ?? '');
+      // The content fetch asks for contentBytes alone; the metadata fetch must
+      // never receive it (that is the whole point of the two-step read).
+      if (select.includes('contentBytes')) {
+        return { status: 200, data: { contentBytes: attachment['contentBytes'] ?? null } as T };
+      }
+      const { contentBytes: _dropped, ...meta } = attachment;
+      return { status: 200, data: meta as T };
+    },
+    async batch(): Promise<GraphBatchResponse[]> {
+      throw new Error('unused');
+    },
+    async follow<T = unknown>(): Promise<GraphResponse<T>> {
+      throw new Error('unused');
+    },
+  };
+  const found = mailModule
+    .build({ graph, config, auth: scopeReadingOnlyAuth(), consentScopes: () => [] })
+    .find((entry) => entry.name === 'mail_get_attachment_content');
+  assert.ok(found !== undefined, 'mail_get_attachment_content should exist');
+  return found;
+}
+
+test('a text file attachment comes back as text', async () => {
+  const get = attachmentTool({
+    ATT: {
+      id: 'ATT',
+      name: 'notes.txt',
+      contentType: 'text/plain',
+      size: 12,
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      contentBytes: Buffer.from('hello world\n', 'utf8').toString('base64'),
+    },
+  });
+  const result = (await get.handler({ id: 'M', attachmentId: 'ATT' })) as Record<string, unknown>;
+  assert.equal(result['kind'], 'fileAttachment');
+  assert.equal(result['text'], 'hello world\n');
+});
+
+test('a binary attachment comes back as capped base64 with a parse pointer', async () => {
+  const get = attachmentTool({
+    ATT: {
+      id: 'ATT',
+      name: 'photo.png',
+      contentType: 'image/png',
+      size: 8,
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      contentBytes: Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]).toString('base64'),
+    },
+  });
+  const result = (await get.handler({ id: 'M', attachmentId: 'ATT' })) as Record<string, unknown>;
+  assert.equal(result['encoding'], 'base64');
+  assert.match(String(result['note'] ?? ''), /files_parse_document/);
+});
+
+test('a reference attachment resolves to its link, never to bytes', async () => {
+  const get = attachmentTool({
+    ATT: {
+      id: 'ATT',
+      name: 'linked.docx',
+      '@odata.type': '#microsoft.graph.referenceAttachment',
+      sourceUrl: 'https://tenant.sharepoint.com/:w:/g/x',
+    },
+  });
+  const result = (await get.handler({ id: 'M', attachmentId: 'ATT' })) as Record<string, unknown>;
+  assert.equal(result['kind'], 'referenceAttachment');
+  assert.equal(result['sourceUrl'], 'https://tenant.sharepoint.com/:w:/g/x');
+  assert.match(String(result['note'] ?? ''), /shareUrl/);
+});
+
+test('an oversize attachment refuses with the $value route', async () => {
+  const get = attachmentTool({
+    ATT: {
+      id: 'ATT',
+      name: 'big.pdf',
+      contentType: 'application/pdf',
+      size: 5_000_000,
+      '@odata.type': '#microsoft.graph.fileAttachment',
+    },
+  });
+  await assert.rejects(() => get.handler({ id: 'M', attachmentId: 'ATT' }), /files_parse_document/);
+});

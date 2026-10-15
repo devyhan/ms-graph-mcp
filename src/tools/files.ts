@@ -12,8 +12,23 @@ import { z } from 'zod';
 import type { ToolDefinition, ToolDeps, ToolGroupMeta, ToolModule } from '../contracts.js';
 import { GROUPS } from './groups.js';
 import { extractCollection } from '../graph/client.js';
+import { fetchContentRange } from '../graph/fetch-binary.js';
+import { resolveShare } from '../graph/shares.js';
 import { escapeODataString } from '../util/odata.js';
+import {
+  decodeParseCursor,
+  parseDocument,
+  type DocumentSource,
+  type ParseDeps,
+} from '../util/parse-document.js';
 import { truncateText } from '../util/truncate.js';
+
+/**
+ * Test seam for `files_parse_document`: when set, the handler merges these
+ * over the real Graph-backed deps. Suite stays offline through it; never set
+ * outside tests.
+ */
+export const filesParseTestHooks: { deps?: Partial<ParseDeps> } = {};
 
 // The group catalogue is a static literal; `files` is always present.
 const GROUP: ToolGroupMeta = GROUPS['files']!;
@@ -26,6 +41,12 @@ const WRITE_SCOPES: string[] = [...GROUP.readScopes, ...GROUP.writeScopes];
  * It is still user-consentable, so this does not make the group admin-only.
  */
 const SHARED_READ_SCOPES: string[] = [...GROUP.readScopes, 'Files.Read.All'];
+
+/**
+ * Parsing also reads mail attachments, so `Mail.Read` rides on that one tool.
+ * Consent is incremental: a drive-only caller never pays for it.
+ */
+const PARSE_SCOPES: string[] = [...SHARED_READ_SCOPES, 'Mail.Read'];
 
 const DRIVE = '/me/drive';
 
@@ -457,6 +478,107 @@ const listSharedSchema = z.object({
     ),
 });
 
+const resolveShareSchema = z.object({
+  shareUrl: z
+    .string()
+    .min(1)
+    .describe(
+      'A OneDrive/SharePoint sharing link, e.g. a contentUrl from a Teams message attachment or a mail reference attachment. Resolves to the drive address behind it.',
+    ),
+});
+
+const driveItemSchema = z.object({
+  driveId: z
+    .string()
+    .min(1)
+    .describe(
+      'Drive id, e.g. the remoteDriveId from files_list_shared or the driveId from teams_get_channel_files_folder.',
+    ),
+  itemId: z
+    .string()
+    .min(1)
+    .describe('Item id within that drive, e.g. the remoteItemId from files_list_shared.'),
+});
+
+const parseDocumentSchema = z
+  .object({
+    shareUrl: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'A sharing link to parse (Teams attachment contentUrl, mail reference-attachment sourceUrl). Exactly one source: shareUrl, driveId+itemId, or messageId+attachmentId.',
+      ),
+    driveId: z.string().min(1).optional().describe('Drive id; pass together with itemId.'),
+    itemId: z.string().min(1).optional().describe('Item id within driveId.'),
+    messageId: z.string().min(1).optional().describe('Mail message id; pass together with attachmentId.'),
+    attachmentId: z.string().min(1).optional().describe('File attachment id within messageId.'),
+    unitOffset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('First unit (page/slide/sheet/section) to return. Defaults to 0; prefer `cursor` to continue.'),
+    unitLimit: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .default(20)
+      .describe('Most units to return. Defaults to 20.'),
+    maxCharsPerUnit: z
+      .number()
+      .int()
+      .min(200)
+      .max(20_000)
+      .default(6000)
+      .describe('Most characters per unit. Defaults to 6000; longer units are cut with a marker and flagged.'),
+    cursor: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Continue a previous call: pass its `cursor` verbatim, without any source argument. Carries the source and paging.',
+      ),
+  })
+  .superRefine((value, ctx) => {
+    if (value.cursor !== undefined) {
+      if (
+        value.shareUrl !== undefined ||
+        value.driveId !== undefined ||
+        value.itemId !== undefined ||
+        value.messageId !== undefined ||
+        value.attachmentId !== undefined
+      ) {
+        ctx.addIssue({ code: 'custom', message: 'Pass either `cursor` or a source, not both.' });
+      }
+      return;
+    }
+    const driveHalf = (value.driveId !== undefined) !== (value.itemId !== undefined);
+    const mailHalf = (value.messageId !== undefined) !== (value.attachmentId !== undefined);
+    if (driveHalf) {
+      ctx.addIssue({ code: 'custom', message: 'driveId and itemId belong together: pass both.' });
+    }
+    if (mailHalf) {
+      ctx.addIssue({ code: 'custom', message: 'messageId and attachmentId belong together: pass both.' });
+    }
+    if (!driveHalf && !mailHalf) {
+      const sources = [
+        value.shareUrl !== undefined,
+        value.driveId !== undefined,
+        value.messageId !== undefined,
+      ].filter(Boolean).length;
+      if (sources === 0) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'Give one source: shareUrl, driveId+itemId, or messageId+attachmentId.',
+        });
+      } else if (sources > 1) {
+        ctx.addIssue({ code: 'custom', message: 'Give exactly one source, not several.' });
+      }
+    }
+  });
+
 const readTextSchema = z.object({
   itemId: z
     .string()
@@ -532,7 +654,7 @@ const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 export const filesModule: ToolModule = {
   group: GROUP,
 
-  build({ graph, config }: ToolDeps): ToolDefinition[] {
+  build({ graph, config, auth }: ToolDeps): ToolDefinition[] {
     // File content is the only unbounded field here, so cap it against the
     // server's own output budget instead of trusting the caller's maxChars.
     const contentCeiling = Math.max(2_000, Math.floor(config.maxOutputChars * 0.8));
@@ -637,7 +759,7 @@ export const filesModule: ToolModule = {
         // Files.Read covers the caller's own drive only; these items are not in it.
         scopes: SHARED_READ_SCOPES,
         description:
-          "Lists files and folders other people have shared with the signed-in user, with count and nextLink. Defaults to 25 items. These entries are stubs pointing into the owner's drive: use remoteDriveId together with remoteItemId to identify one, or open its webUrl. The other files_* tools address only your own OneDrive, so they cannot read these items by id. Needs the Files.Read.All scope, which a user can consent to without an administrator.",
+          "Lists files and folders other people have shared with the signed-in user, with count and nextLink. Defaults to 25 items. These entries are stubs pointing into the owner's drive: use remoteDriveId together with remoteItemId to identify one, or open its webUrl. Most files_* tools address only your own OneDrive, but files_get_drive_item and files_parse_document take those remote ids directly. Needs the Files.Read.All scope, which a user can consent to without an administrator.",
         inputSchema: listSharedSchema,
         handler: async (args) => {
           const { top } = listSharedSchema.parse(args);
@@ -652,12 +774,45 @@ export const filesModule: ToolModule = {
       },
 
       {
+        name: 'files_resolve_share',
+        title: 'Resolve a sharing link',
+        group: GROUP.name,
+        scopes: SHARED_READ_SCOPES,
+        description:
+          'Resolves a OneDrive/SharePoint sharing link to the drive address behind it: driveId plus itemId, name, kind, size, mime type and webUrl. The contentUrl on a Teams message attachment and the sourceUrl on a mail reference attachment are both sharing links, so this is the first step from either to the file itself — or skip it and pass the link straight to files_parse_document as shareUrl. Needs the Files.Read.All scope, which a user can consent to without an administrator.',
+        inputSchema: resolveShareSchema,
+        handler: async (args) => {
+          const { shareUrl } = resolveShareSchema.parse(args);
+          const item = await resolveShare(graph, SHARED_READ_SCOPES, shareUrl);
+          return { shareUrl, ...item };
+        },
+      },
+
+      {
+        name: 'files_get_drive_item',
+        title: 'Get an item from any drive',
+        group: GROUP.name,
+        scopes: SHARED_READ_SCOPES,
+        description:
+          'Reads the metadata of one file or folder in ANY drive the signed-in user can reach — not just their own OneDrive — returning the same detail as files_get_item. This is what makes the remoteDriveId/remoteItemId stubs from files_list_shared and files_list_recent readable, and the driveId/itemId from teams_get_channel_files_folder addressable. Needs the Files.Read.All scope, which a user can consent to without an administrator.',
+        inputSchema: driveItemSchema,
+        handler: async (args) => {
+          const { driveId, itemId } = driveItemSchema.parse(args);
+          const res = await graph.request<DriveItem>({
+            path: `/drives/${seg(driveId)}/items/${seg(itemId)}`,
+            scopes: SHARED_READ_SCOPES,
+          });
+          return projectItemDetail(res.data);
+        },
+      },
+
+      {
         name: 'files_read_text',
         title: 'Read a text file from OneDrive',
         group: GROUP.name,
         scopes: READ_SCOPES,
         description:
-          'Returns the contents of a text-like OneDrive file (plain text, Markdown, CSV, JSON, XML, source code, config) as a string, truncated to maxChars, which defaults to 20000. Reads the file metadata first and refuses binary formats — PDFs, images, Office documents, archives, media — with an explanation, because their bytes are not readable as text. Word, Excel and PowerPoint files are zip containers and cannot be read here.',
+          'Returns the contents of a text-like OneDrive file (plain text, Markdown, CSV, JSON, XML, source code, config) as a string, truncated to maxChars, which defaults to 20000. Reads the file metadata first and refuses binary formats — PDFs, images, Office documents, archives, media — with an explanation, because their bytes are not readable as text. For .docx, .xlsx, .pptx and .pdf use files_parse_document, which extracts their text as pages, slides or sheets.',
         inputSchema: readTextSchema,
         handler: async (args) => {
           const { itemId, maxChars } = readTextSchema.parse(args);
@@ -706,6 +861,47 @@ export const filesModule: ToolModule = {
             webUrl: item.webUrl,
             content: truncateText(coerceText(content.data), limit),
           });
+        },
+      },
+
+      {
+        name: 'files_parse_document',
+        title: 'Parse a document to text',
+        group: GROUP.name,
+        scopes: PARSE_SCOPES,
+        description:
+          'Extracts the text of a .docx, .xlsx, .pptx or .pdf as unit ROWS — sections, sheets, slides or pages, never one giant string — plus a manifest accounting for every unit: unitCount, per-unit truncated flags, returnedRange, a reason ("complete" means the document ran out, "maxItems" means units remain), and a cursor to continue with. Give exactly one source: shareUrl (a Teams attachment contentUrl or mail reference-attachment link), driveId+itemId (including remote ids from files_list_shared and teams_get_channel_files_folder), or messageId+attachmentId (a mail file attachment). Spreadsheet formulas come back as their saved values, never evaluated. Friendly errors, never attempts: password/IRM-protected files, scanned PDFs (no OCR here), legacy .doc/.ppt/.xls, files over 16 MiB. Long documents cap at 50 PDF pages and 100k spreadsheet rows per parse.',
+        inputSchema: parseDocumentSchema,
+        handler: async (args) => {
+          const input = parseDocumentSchema.parse(args);
+          let source: DocumentSource;
+          let unitOffset = input.unitOffset;
+          let unitLimit = input.unitLimit;
+          let maxCharsPerUnit = Math.min(input.maxCharsPerUnit, contentCeiling);
+          if (input.cursor !== undefined) {
+            const cursor = decodeParseCursor(input.cursor);
+            source = cursor.source;
+            unitOffset = cursor.unitOffset;
+            unitLimit = cursor.unitLimit;
+            maxCharsPerUnit = Math.min(cursor.maxCharsPerUnit, contentCeiling);
+          } else if (input.shareUrl !== undefined) {
+            source = { shareUrl: input.shareUrl };
+          } else if (input.driveId !== undefined && input.itemId !== undefined) {
+            source = { driveId: input.driveId, itemId: input.itemId };
+          } else if (input.messageId !== undefined && input.attachmentId !== undefined) {
+            source = { messageId: input.messageId, attachmentId: input.attachmentId };
+          } else {
+            // Unreachable: the schema refinement rejects sourceless calls.
+            throw new Error('Give one source: shareUrl, driveId+itemId, or messageId+attachmentId.');
+          }
+          const deps: ParseDeps = {
+            graph,
+            fileScopes: SHARED_READ_SCOPES,
+            mailScopes: ['Mail.Read'],
+            fetchBytes: (opts) => fetchContentRange(auth, config, opts),
+            ...filesParseTestHooks.deps,
+          };
+          return parseDocument({ source, unitOffset, unitLimit, maxCharsPerUnit }, deps);
         },
       },
 
