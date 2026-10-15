@@ -259,7 +259,8 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
       `, discovery ${config.discovery ? 'on' : 'off'}` +
       `, org-mode ${config.orgMode ? 'on' : 'off'}` +
       `, beta ${config.allowBeta ? 'allowed' : 'blocked'}` +
-      `, generic writes ${config.allowGenericWrite ? 'allowed' : 'blocked'}\n`,
+      `, generic writes ${config.allowGenericWrite ? 'allowed' : 'blocked'}` +
+      `, output ${config.output}\n`,
   );
   out(`${pad('Sign-in:')}${describeAuthFlow(config)}\n`);
   out(`${pad('Groups:')}${config.groups.join(', ')} (+ generic)\n`);

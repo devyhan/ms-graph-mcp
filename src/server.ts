@@ -382,7 +382,7 @@ export function createServerFactory(deps: FactoryDeps): () => McpServer {
         async (args: unknown) => {
           try {
             const value = await def.handler((args ?? {}) as Record<string, unknown>);
-            const { text } = serializeResult(value, config.maxOutputChars);
+            const { text } = serializeResult(value, config.maxOutputChars, config.output);
             return { content: [{ type: 'text' as const, text }] };
           } catch (error) {
             return {

@@ -755,6 +755,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 | `--beta` | `MS365_MCP_ALLOW_BETA` | off | Allow requests against the Graph beta endpoint. |
 | `--allow-generic-write` | `MS365_MCP_ALLOW_GENERIC_WRITE` | off | Let `graph_request` send POST, PATCH, PUT and DELETE. |
 | `--max-output-chars <n>` | `MS365_MCP_MAX_OUTPUT_CHARS` | `60000` | Truncate serialised tool output beyond this many characters. |
+| `--output <name>` | `MS365_MCP_OUTPUT` | `json` | Tool result format: `json` (indented) or `toon` (compact tables: headers once plus bare rows). |
 | `--cache-dir <path>` | `MS365_MCP_CACHE_DIR` | OS config directory | Directory holding the token cache. |
 | `--verbose`, `-v` | `MS365_MCP_VERBOSE` | off | Log Graph requests to stderr. |
 | `--help`, `-h` | | | Print help and exit. |

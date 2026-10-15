@@ -34,6 +34,7 @@ const config: ServerConfig = {
   discovery: false,
   orgMode: false,
   maxOutputChars: 60_000,
+  output: 'json',
   verbose: false,
   cacheDir: '/nonexistent',
   authFlow: 'auto',

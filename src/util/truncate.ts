@@ -5,6 +5,9 @@
  * kilobytes; handing that to a model wastes the window and often fails outright.
  */
 
+import type { OutputFormat } from '../contracts.js';
+import { encodeToon } from './toon.js';
+
 /** Result of serialising a tool return value under a character budget. */
 export interface SerializedResult {
   text: string;
@@ -58,9 +61,19 @@ function stringifySafe(value: unknown): string {
  * inside, and go looking for a malformed value that does not exist. Leading
  * with the warning costs one line and removes that entirely.
  */
-function truncationNotice(originalChars: number, keptChars: number): string {
+/**
+ * Full serialisation in the configured format. TOON sanitises the same
+ * hostile values (cycles, BigInt, throwing getters), so the format switch
+ * cannot turn a payload that used to serialise into a throw.
+ */
+function stringifyInFormat(value: unknown, output: OutputFormat): string {
+  return output === 'toon' ? encodeToon(value) : stringifySafe(value);
+}
+
+function truncationNotice(originalChars: number, keptChars: number, output: OutputFormat): string {
+  const format = output === 'toon' ? 'TOON' : 'JSON';
   return (
-    `--- OUTPUT TRUNCATED: NOT VALID JSON ---\n` +
+    `--- OUTPUT TRUNCATED: NOT VALID ${format} ---\n` +
     `What follows is the first ${keptChars} of ${originalChars} characters and stops mid-structure, ` +
     `so parsing it will fail. It could not be shortened by dropping rows, which means one item is ` +
     `itself over the limit. Read it as text, or call again for less: fewer fields, a smaller page, ` +
@@ -69,12 +82,18 @@ function truncationNotice(originalChars: number, keptChars: number): string {
 }
 
 /**
- * Serialises a tool result to indented JSON, cutting it to `maxChars` and
- * appending an explanation the model can act on. The returned text may exceed
- * `maxChars` by the length of that notice — the notice is the point.
+ * Serialises a tool result to indented JSON (or compact TOON when asked),
+ * cutting it to `maxChars` and appending an explanation the model can act on.
+ * The returned text may exceed `maxChars` by the length of that notice —
+ * the notice is the point.
  */
-export function serializeResult(value: unknown, maxChars: number): SerializedResult {
-  const full = stringifySafe(value);
+export function serializeResult(
+  value: unknown,
+  maxChars: number,
+  output: OutputFormat = 'json',
+): SerializedResult {
+  const stringify = (candidate: unknown): string => stringifyInFormat(candidate, output);
+  const full = stringify(value);
   const originalChars = full.length;
   const limit = Number.isFinite(maxChars) && maxChars > 0 ? Math.floor(maxChars) : 0;
 
@@ -84,22 +103,22 @@ export function serializeResult(value: unknown, maxChars: number): SerializedRes
 
   // Drop whole rows before resorting to cutting characters. A tool result is
   // almost always an object with one array in it, and half a row helps nobody:
-  // the model parses the JSON, so a result that is still JSON — with fewer
+  // the model parses the payload, so a result that is still valid — with fewer
   // items and a field saying so — is worth far more than a prefix of one.
-  const trimmed = dropRowsToFit(value, limit);
+  const trimmed = dropRowsToFit(value, limit, stringify);
   if (trimmed !== null) {
-    const text = stringifySafe(trimmed);
+    const text = stringify(trimmed);
     if (text.length <= limit) {
       return { text, truncated: true, originalChars };
     }
   }
 
   // Nothing row-shaped to shed, or the rows are individually too big. Fall back
-  // to a character cut, which is not valid JSON — say so first rather than
-  // letting the reader discover it from a parse error at some byte offset.
+  // to a character cut, which is not valid in the format — say so first rather
+  // than letting the reader discover it from a parse error at some byte offset.
   const kept = full.slice(0, limit);
   return {
-    text: truncationNotice(originalChars, kept.length) + '\n' + kept,
+    text: truncationNotice(originalChars, kept.length, output) + '\n' + kept,
     truncated: true,
     originalChars,
   };
@@ -112,7 +131,11 @@ export function serializeResult(value: unknown, maxChars: number): SerializedRes
  * Binary search on the row count rather than dropping one at a time: a chat
  * list can be hundreds of rows and each attempt re-serialises the object.
  */
-function dropRowsToFit(value: unknown, limit: number): Record<string, unknown> | null {
+function dropRowsToFit(
+  value: unknown,
+  limit: number,
+  stringify: (candidate: unknown) => string,
+): Record<string, unknown> | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
 
   const source = value as Record<string, unknown>;
@@ -141,13 +164,13 @@ function dropRowsToFit(value: unknown, limit: number): Record<string, unknown> |
   });
 
   // The empty-list case still carries the note, so a caller always learns why.
-  if (stringifySafe(build(0)).length > limit) return null;
+  if (stringify(build(0)).length > limit) return null;
 
   let low = 0;
   let high = rows.length;
   while (low < high) {
     const mid = Math.ceil((low + high) / 2);
-    if (stringifySafe(build(mid)).length <= limit) low = mid;
+    if (stringify(build(mid)).length <= limit) low = mid;
     else high = mid - 1;
   }
   return build(low);

@@ -365,6 +365,14 @@ export interface ToolModule {
 // Configuration
 // ---------------------------------------------------------------------------
 
+/**
+ * Serialisation used for tool result text.
+ *
+ * - `json` — indented JSON. The default.
+ * - `toon` — compact TOON-style tables: headers once plus bare rows.
+ */
+export type OutputFormat = 'json' | 'toon';
+
 /** Fully resolved runtime configuration. */
 export interface ServerConfig {
   /** Entra application (client) ID. */
@@ -395,6 +403,8 @@ export interface ServerConfig {
   orgMode: boolean;
   /** Hard cap on serialised tool output, in characters. */
   maxOutputChars: number;
+  /** Serialisation used for tool result text. */
+  output: OutputFormat;
   /** Log Graph requests to stderr. */
   verbose: boolean;
   /** Directory holding the encrypted token cache. */

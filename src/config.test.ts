@@ -10,6 +10,8 @@ import {
   DEFAULT_AUTH_PORT,
   DEFAULT_CLOUD,
   DEFAULT_MAX_OUTPUT_CHARS,
+  DEFAULT_OUTPUT,
+  OUTPUT_FORMATS,
   SHIPPED_APP_DISCLOSURE,
   SHIPPED_CLIENT_ID,
   buildClientIdSetupMessage,
@@ -57,6 +59,7 @@ const baseConfig: ServerConfig = {
   discovery: false,
   orgMode: false,
   maxOutputChars: 60_000,
+  output: 'json',
   verbose: false,
   cacheDir: '/nonexistent',
   authFlow: 'auto',
@@ -91,6 +94,8 @@ test('bare invocation serves with the personal default groups', () => {
   assert.equal(config.graphHost, 'graph.microsoft.com');
   assert.equal(config.authority, 'https://login.microsoftonline.com/common');
   assert.equal(config.maxOutputChars, DEFAULT_MAX_OUTPUT_CHARS);
+  assert.equal(config.output, DEFAULT_OUTPUT);
+  assert.equal(config.output, 'json');
   assert.equal(config.readOnly, false);
   assert.equal(config.orgMode, false);
   assert.equal(config.graphVersion, 'v1.0');
@@ -155,6 +160,55 @@ test('--auth-port takes 0 or an unprivileged port and rejects the rest', () => {
   assert.throws(() => parseConfig(['--auth-port', '70000'], NO_ENV), /1024-65535/);
   assert.throws(() => parseConfig(['--auth-port', '8400.5'], NO_ENV), /must be a whole number/);
   assert.throws(() => parseConfig([], { MS365_MCP_AUTH_PORT: '80' }), /MS365_MCP_AUTH_PORT/);
+});
+
+test('--output defaults to json and accepts every documented value', () => {
+  assert.equal(DEFAULT_OUTPUT, 'json');
+  assert.deepEqual(OUTPUT_FORMATS, ['json', 'toon']);
+  assert.equal(parseConfig([], NO_ENV).config.output, 'json');
+
+  for (const format of OUTPUT_FORMATS) {
+    assert.equal(parseConfig(['--output', format], NO_ENV).config.output, format, format);
+    assert.equal(parseConfig([`--output=${format}`], NO_ENV).config.output, format, format);
+    assert.equal(
+      parseConfig([], { MS365_MCP_OUTPUT: format }).config.output,
+      format,
+      `env ${format}`,
+    );
+  }
+  assert.equal(parseConfig(['--output', 'TOON'], NO_ENV).config.output, 'toon');
+});
+
+test('an unknown --output value is rejected and the valid ones listed', () => {
+  for (const argv of [['--output', 'yaml'], ['--output=yaml']]) {
+    assert.throws(
+      () => parseConfig(argv, NO_ENV),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Unknown output format "yaml"/);
+        assert.match(error.message, /json/);
+        assert.match(error.message, /toon/);
+        return true;
+      },
+      argv.join(' '),
+    );
+  }
+  assert.throws(
+    () => parseConfig([], { MS365_MCP_OUTPUT: 'yaml' }),
+    /MS365_MCP_OUTPUT.*Valid formats: json, toon/s,
+  );
+});
+
+test('the output flag beats the environment, and help documents both', () => {
+  const { config } = parseConfig(['--output', 'json'], { MS365_MCP_OUTPUT: 'toon' });
+  assert.equal(config.output, 'json');
+  assert.equal(parseConfig([], { MS365_MCP_OUTPUT: 'toon' }).config.output, 'toon');
+
+  const help = parseConfig(['--help'], NO_ENV).command;
+  assert.equal(help.kind, 'help');
+  const text = help.kind === 'help' ? help.text : '';
+  assert.match(text, /--output/);
+  assert.match(text, /MS365_MCP_OUTPUT/);
 });
 
 test('auth flags on the command line beat the environment', () => {

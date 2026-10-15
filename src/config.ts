@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { AuthFlow, ServerConfig } from './contracts.js';
+import type { AuthFlow, OutputFormat, ServerConfig } from './contracts.js';
 import { GROUPS, GROUP_NAMES, PRESET_NAMES, PRESETS, resolveGroups } from './tools/groups.js';
 
 /** What the process should do once configuration is resolved. */
@@ -35,6 +35,12 @@ export const DEFAULT_AUTH_FLOW: AuthFlow = 'auto';
 
 /** Loopback port for the browser redirect when `--auth-port` is not given. */
 export const DEFAULT_AUTH_PORT = 0;
+
+/** Every accepted `--output` value, in help-text order. */
+export const OUTPUT_FORMATS: OutputFormat[] = ['json', 'toon'];
+
+/** Tool result format used when `--output` is not given. */
+export const DEFAULT_OUTPUT: OutputFormat = 'json';
 
 /**
  * One line per flow for `--help`. Both flows are OAuth 2.0; they differ only in
@@ -434,6 +440,13 @@ const FLAGS: FlagSpec[] = [
     fallback: String(DEFAULT_MAX_OUTPUT_CHARS),
   },
   {
+    flag: '--output',
+    env: 'MS365_MCP_OUTPUT',
+    value: '<name>',
+    summary: `Tool result format: ${OUTPUT_FORMATS.join(' | ')}.`,
+    fallback: DEFAULT_OUTPUT,
+  },
+  {
     flag: '--cache-dir',
     env: 'MS365_MCP_CACHE_DIR',
     value: '<path>',
@@ -513,6 +526,17 @@ function parseAuthFlow(raw: string, source: string): AuthFlow {
   }
   throw new ConfigError(
     `Unknown auth flow "${raw}" for ${source}. Valid flows: ${AUTH_FLOWS.join(', ')}.`,
+  );
+}
+
+/** Resolves an `--output` value. Case-insensitive, like `--auth-flow`. */
+function parseOutput(raw: string, source: string): OutputFormat {
+  const value = raw.trim().toLowerCase();
+  for (const format of OUTPUT_FORMATS) {
+    if (format === value) return format;
+  }
+  throw new ConfigError(
+    `Unknown output format "${raw}" for ${source}. Valid formats: ${OUTPUT_FORMATS.join(', ')}.`,
   );
 }
 
@@ -688,6 +712,7 @@ interface RawOptions {
   beta?: boolean;
   allowGenericWrite?: boolean;
   maxOutputChars?: number;
+  output?: OutputFormat;
   cacheDir?: string;
   verbose?: boolean;
   authFlow?: AuthFlow;
@@ -714,6 +739,8 @@ function fromEnv(env: NodeJS.ProcessEnv): RawOptions {
   if (maxOutput !== undefined) {
     raw.maxOutputChars = parsePositiveInt(maxOutput, 'MS365_MCP_MAX_OUTPUT_CHARS');
   }
+  const output = envString(env, 'MS365_MCP_OUTPUT');
+  if (output !== undefined) raw.output = parseOutput(output, 'MS365_MCP_OUTPUT');
   const cacheDir = envString(env, 'MS365_MCP_CACHE_DIR');
   if (cacheDir !== undefined) raw.cacheDir = cacheDir;
   const authFlow = envString(env, 'MS365_MCP_AUTH_FLOW');
@@ -863,6 +890,9 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
       case '--max-output-chars':
         raw.maxOutputChars = parsePositiveInt(takeValue(), '--max-output-chars');
         break;
+      case '--output':
+        raw.output = parseOutput(takeValue(), '--output');
+        break;
       case '--cache-dir':
         raw.cacheDir = takeValue();
         break;
@@ -969,6 +999,7 @@ function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {
       discovery: raw.discovery ?? false,
       orgMode,
       maxOutputChars: raw.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS,
+      output: raw.output ?? DEFAULT_OUTPUT,
       verbose: raw.verbose ?? false,
       cacheDir: raw.cacheDir ?? defaultCacheDir(env),
       authFlow: raw.authFlow ?? DEFAULT_AUTH_FLOW,

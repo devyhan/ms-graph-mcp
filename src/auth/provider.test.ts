@@ -38,6 +38,7 @@ const BASE_CONFIG: ServerConfig = {
   discovery: false,
   orgMode: false,
   maxOutputChars: 25_000,
+  output: 'json',
   verbose: false,
   cacheDir: '/nonexistent',
   authFlow: 'auto',

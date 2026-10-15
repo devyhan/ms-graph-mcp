@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { AuthProvider, GraphClient, ServerConfig } from './contracts.js';
+import type {
+  AuthProvider,
+  GraphClient,
+  OutputFormat,
+  ServerConfig,
+  ToolDefinition,
+} from './contracts.js';
 import { InteractionRequiredError } from './contracts.js';
+import { z } from 'zod';
 import {
   AGENT_START_PROMPT,
   SERVER_INSTRUCTIONS,
@@ -10,6 +17,7 @@ import {
   createServerFactory,
   signInMessage,
 } from './server.js';
+import { decodeToon } from './util/toon.js';
 
 test('a tenant mismatch is a configuration problem, never a missing sign-in', () => {
   const text = signInMessage(
@@ -226,6 +234,7 @@ test('the factory advertises instructions and registers agent_start', () => {
     discovery: false,
     orgMode: false,
     maxOutputChars: 60_000,
+    output: 'json',
     verbose: false,
     cacheDir: '/nonexistent',
     authFlow: 'auto',
@@ -250,4 +259,81 @@ test('the factory advertises instructions and registers agent_start', () => {
   assert.equal(registered['agent_start']?.description, AGENT_START_PROMPT.description);
   assert.ok('prompts' in inner._capabilities, 'expected the prompts capability to be declared');
   assert.equal(inner._instructions, SERVER_INSTRUCTIONS);
+});
+
+test('registered tools serialise results in the configured output format', async () => {
+  // The registration wrapper is the single stringify point: one probe tool
+  // proves every tool inherits the format, in both directions.
+  const unreachable = async (): Promise<never> => {
+    throw new Error('the probe tool never reaches Graph or auth');
+  };
+  const graph = { request: unreachable, batch: unreachable, follow: unreachable } as GraphClient;
+  const auth = {
+    getToken: unreachable,
+    getAccount: unreachable,
+    login: unreachable,
+    logout: unreachable,
+    beginDeviceLogin: unreachable,
+    deviceLoginStatus: unreachable,
+  } as AuthProvider;
+  const value = {
+    rows: [
+      { a: 1, b: 'x' },
+      { a: 2, b: 'y' },
+    ],
+  };
+  const tool: ToolDefinition = {
+    name: 'probe_tool',
+    title: 'Probe',
+    description: 'Returns a fixed value.',
+    inputSchema: z.object({}),
+    scopes: [],
+    group: 'me',
+    handler: () => Promise.resolve(value),
+  };
+
+  const textFor = async (output: OutputFormat): Promise<string> => {
+    const config: ServerConfig = {
+      clientId: '00000000-0000-0000-0000-000000000000',
+      tenantId: 'common',
+      authority: 'https://login.microsoftonline.com/common',
+      graphHost: 'graph.microsoft.com',
+      groups: ['me'],
+      readOnly: false,
+      graphVersion: 'v1.0',
+      allowBeta: false,
+      discovery: false,
+      orgMode: false,
+      maxOutputChars: 60_000,
+      output,
+      verbose: false,
+      cacheDir: '/nonexistent',
+      authFlow: 'auto',
+      authPort: 0,
+      allowGenericWrite: false,
+    };
+    const server = createServerFactory({ config, graph, auth, tools: [tool] })();
+    // Same narrow cast as the prompt test above: the raw callback is the
+    // only way to observe what a tool call returns without a client.
+    const registered = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: unknown) => Promise<{ content: [{ text: string }] }> }
+        >;
+      }
+    )._registeredTools;
+    const entry = registered['probe_tool'];
+    assert.ok(entry !== undefined, 'expected probe_tool among the registered tools');
+    const result = await entry.handler({});
+    const first = result.content[0];
+    assert.ok(first !== undefined);
+    return first.text;
+  };
+
+  const json = await textFor('json');
+  const toon = await textFor('toon');
+  assert.deepEqual(JSON.parse(json), value);
+  assert.deepEqual(decodeToon(toon), value);
+  assert.ok(toon.length < json.length, `expected toon (${toon.length}) to beat json (${json.length})`);
 });

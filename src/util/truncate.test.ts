@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { decodeToon } from './toon.js';
 import { serializeResult } from './truncate.js';
 
 /**
@@ -134,4 +135,76 @@ test('a cycle through an array is cut too', () => {
   const text = serializeResult({ list }, 0).text;
   assert.ok(text.includes('[Circular]'));
   assert.doesNotThrow(() => JSON.parse(text));
+});
+
+/**
+ * The compact format shares the same budget machinery: row-dropping and the
+ * character-cut fallback both apply, only the spelling changes.
+ */
+
+const message = (i: number) => ({
+  id: `AAMkAGI${i}AAAA=`,
+  subject: `Re: Quarterly planning, part ${i}`,
+  from: `teammate${i}@example.com`,
+  received: '2026-09-23T01:27:06.603Z',
+  read: i % 2 === 0,
+});
+
+test('the default format is indented JSON, byte for byte', () => {
+  const value = { count: 2, messages: [message(1), message(2)] };
+  assert.equal(serializeResult(value, 0).text, JSON.stringify(value, null, 2));
+});
+
+test('a toon result under the limit decodes back to the value', () => {
+  const value = { count: 2, messages: [message(1), message(2)] };
+  const out = serializeResult(value, 100_000, 'toon');
+  assert.equal(out.truncated, false);
+  assert.deepEqual(decodeToon(out.text), value);
+});
+
+test('toon output is shorter than JSON on a realistic multi-row fixture', () => {
+  const value = {
+    count: 25,
+    nextLink: 'https://graph.microsoft.com/v1.0/me/messages?$skiptoken=X',
+    messages: Array.from({ length: 25 }, (_, i) => message(i)),
+  };
+  const json = serializeResult(value, 0);
+  const toon = serializeResult(value, 0, 'toon');
+
+  assert.ok(
+    toon.text.length < json.text.length,
+    `expected toon (${toon.text.length} chars) to beat json (${json.text.length} chars)`,
+  );
+  // Shorter must not mean lossy.
+  assert.deepEqual(decodeToon(toon.text), value);
+  assert.deepEqual(JSON.parse(json.text), value);
+});
+
+test('an oversized toon collection stays valid TOON, with fewer rows', () => {
+  const value = { count: 400, messages: Array.from({ length: 400 }, (_, i) => message(i)) };
+  const out = serializeResult(value, 6_000, 'toon');
+
+  assert.equal(out.truncated, true);
+  assert.ok(out.text.length <= 6_000, `expected <= 6000 chars, got ${out.text.length}`);
+  const parsed = decodeToon(out.text) as {
+    count: number;
+    messages: unknown[];
+    truncated: { field: string; total: number; returned: number };
+  };
+  assert.ok(parsed.messages.length > 0, 'should keep as many rows as fit');
+  assert.ok(parsed.messages.length < 400, 'should have dropped some');
+  assert.deepEqual(parsed.messages[0], message(0), 'kept rows are intact, not clipped');
+  assert.equal(parsed.truncated.field, 'messages');
+  assert.equal(parsed.truncated.total, 400);
+  assert.equal(parsed.truncated.returned, parsed.messages.length);
+  assert.equal(parsed.count, 400);
+});
+
+test('one oversized toon item falls back to a character cut, warning first', () => {
+  const value = { blob: 'x'.repeat(50_000) };
+  const out = serializeResult(value, 1_000, 'toon');
+
+  assert.equal(out.truncated, true);
+  assert.throws(() => decodeToon(out.text), 'this case genuinely cannot stay valid');
+  assert.match(out.text.slice(0, 80), /NOT VALID TOON/);
 });
