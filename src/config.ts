@@ -681,6 +681,22 @@ export function buildHelpText(): string {
   return lines.join('\n');
 }
 
+/** Package name, read from package.json next to the compiled output. */
+export function packageName(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(path.join(here, '..', 'package.json'), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'object' && parsed !== null && 'name' in parsed) {
+      const name = (parsed as { name?: unknown }).name;
+      if (typeof name === 'string' && name.trim() !== '') return name;
+    }
+  } catch {
+    // A packaged install may not ship package.json beside dist/.
+  }
+  return '@devyhan/ms-graph-mcp';
+}
+
 /** Package version, read from package.json next to the compiled output. */
 export function packageVersion(): string {
   try {

@@ -115,3 +115,36 @@ jobs:
           echo "https://www.npmjs.com/package/@devyhan/ms-graph-mcp" >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo 'Verify independently with `npm audit signatures` against a fresh install.' >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: Create GitHub Release
+    # Runs only for tag pushes, after publish succeeded: a tag that fails the
+    # tag==package.json gate never reaches this job, so no Release is cut for
+    # a version npm rejected.
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release from CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          notes_file="$(mktemp)"
+          awk -v ver="$version" '
+            /^## \[/ { capture = ($0 ~ "^## \\[" ver "\\]( |$)"); next }
+            capture { print }
+          ' CHANGELOG.md > "$notes_file"
+          if [ -s "$notes_file" ] && grep -q '[^[:space:]]' "$notes_file"; then
+            echo "Using CHANGELOG section for $version"
+            gh release create "$tag" --title "$version" --notes-file "$notes_file"
+          else
+            echo "No CHANGELOG section for $version; falling back to generated notes"
+            gh release create "$tag" --title "$version" --generate-notes
+          fi

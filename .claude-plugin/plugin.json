@@ -2,7 +2,7 @@
   "$schema": "https://code.claude.com/schemas/plugin.json",
   "name": "ms-graph-mcp",
   "displayName": "Microsoft Graph MCP",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Read your own Microsoft 365 — Outlook mail and calendar, OneDrive, SharePoint, Teams chat, To Do, Planner — from Claude Code, through Microsoft Graph with delegated permissions.",
   "author": {
     "name": "devyhan",

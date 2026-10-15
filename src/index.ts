@@ -20,6 +20,7 @@ import {
   describeClientIdSource,
   graphBaseUrl,
   isClientIdUnset,
+  packageName,
   packageVersion,
   parseConfig,
 } from './config.js';
@@ -27,6 +28,7 @@ import { createGraphClient } from './graph/client.js';
 import { collectTools, createServerFactory } from './server.js';
 import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, loginScopesFor, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
+import { checkForUpdate } from './util/update-check.js';
 
 /** Scopes every session asks for regardless of which groups are enabled. */
 const BASE_SCOPES = ['offline_access', 'User.Read'];
@@ -466,6 +468,27 @@ async function main(): Promise<number | undefined> {
 
   const { config, command } = parsed;
   setLogger(createLogger(config.verbose));
+
+  // One stderr line when a newer release is known: cached 24h, silent on
+  // error/offline/CI. Awaited on human commands so the notice prints before a
+  // fast command exits; detached on serve so the stdio handshake never waits.
+  // stdout is untouched on every path.
+  if (command.kind === 'serve') {
+    void checkForUpdate({
+      cacheDir: config.cacheDir,
+      currentVersion: packageVersion(),
+      packageName: packageName(),
+    }).then((notice) => {
+      if (notice !== undefined) err(`${notice}\n`);
+    });
+  } else {
+    const notice = await checkForUpdate({
+      cacheDir: config.cacheDir,
+      currentVersion: packageVersion(),
+      packageName: packageName(),
+    });
+    if (notice !== undefined) err(`${notice}\n`);
+  }
 
   switch (command.kind) {
     case 'help':

@@ -4,6 +4,20 @@ A Model Context Protocol server that gives an AI assistant access to your own Mi
 
 > **Not affiliated with Microsoft.** This is an independent community project. Microsoft, Microsoft 365, Microsoft Graph, Outlook, OneDrive, SharePoint, Teams, Entra and Intune are trademarks of the Microsoft group of companies, used here only to describe what this software connects to.
 
+## Install with one prompt
+
+Paste this to your AI assistant, replacing the two IDs with your Entra app registration's values:
+
+```text
+https://github.com/devyhan/ms-graph-mcp
+
+Install the MCP above.
+• CLIENT_ID: <APPLICATION_ID>
+• TENANT_ID: <DIRECTORY_ID>
+```
+
+Find both IDs in the [Microsoft Entra admin center](https://entra.microsoft.com) under **App registrations → your app → Overview**: `Application (client) ID` and `Directory (tenant) ID`. The app must allow public client flows with an `http://localhost` redirect URI (under **Authentication → Mobile and desktop applications**), and an administrator must grant consent for the Graph permissions it requests.
+
 ## Why an MCP server
 
 Microsoft Graph is an ordinary HTTP API. Everything this server does could, in principle, be a
