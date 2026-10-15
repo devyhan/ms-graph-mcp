@@ -55,6 +55,10 @@ test('missing consent says the session is fine and signing in again is the fix',
       [],
       false,
       true,
+      false,
+      false,
+      false,
+      ['Chat.Read'],
     ),
   );
 
@@ -62,7 +66,24 @@ test('missing consent says the session is fine and signing in again is the fix',
   assert.match(text, /not by a missing sign-in/);
   assert.match(text, /Call `auth_begin_login`/);
   assert.match(text, /prompts only for what was added/);
+  // Paste-ready, not a placeholder: the exact tool argument and CLI flag.
+  assert.match(text, /Paste-ready: `auth_begin_login` with `\{"scopes": \["Chat\.Read"\]\}`/);
+  assert.match(text, /`npx @devyhan\/ms-graph-mcp login --scopes Chat\.Read`/);
   assert.match(text, /\nDetail: Blocked by missing consent/);
+});
+
+test('missing consent without recorded scopes stays generic', () => {
+  const text = signInMessage(
+    new InteractionRequiredError(
+      'Blocked by missing consent for these scopes: Chat.Read.',
+      [],
+      false,
+      true,
+    ),
+  );
+  // No scopes recorded, so no paste-ready line — but the headline still stands.
+  assert.match(text, /^Blocked by missing consent/);
+  assert.doesNotMatch(text, /Paste-ready/);
 });
 
 test('missing admin consent wins over missing consent', () => {
@@ -73,6 +94,65 @@ test('missing admin consent wins over missing consent', () => {
   );
 
   assert.match(text, /^Blocked by missing tenant admin consent/);
+  assert.doesNotMatch(text, /^Blocked by missing consent —/m);
+});
+
+test('a Conditional Access refusal retries the browser, never the device code', () => {
+  const text = signInMessage(
+    new InteractionRequiredError('AADSTS53003 on the refresh.', [], false, false, true),
+  );
+
+  assert.match(text, /^Blocked by a Conditional Access policy/);
+  assert.match(text, /not by a missing sign-in/);
+  assert.match(text, /Call `auth_begin_login`/);
+  assert.match(text, /commonly blocks it too/);
+  assert.match(text, /\nDetail: AADSTS53003/);
+});
+
+test('a network failure retries the call, never the sign-in', () => {
+  const text = signInMessage(
+    new InteractionRequiredError('ENOTFOUND on the refresh.', [], false, false, false, true),
+  );
+
+  assert.match(text, /^Blocked by a network failure/);
+  assert.match(text, /not by a missing sign-in/);
+  assert.match(text, /do not offer `auth_begin_login`/);
+  assert.match(text, /--use-env-proxy/);
+});
+
+test('a loopback timeout names the device flow as the way out', () => {
+  const text = signInMessage(
+    new InteractionRequiredError('loopback_server_timeout.', [], false, false, false, false, true),
+  );
+
+  assert.match(text, /^Blocked by a loopback redirect timeout/);
+  assert.match(text, /not by a missing sign-in/);
+  assert.match(text, /--auth-flow device/);
+});
+
+test('missing admin consent wins over Conditional Access and network failures', () => {
+  // Every other fix fails until an administrator grants those scopes, so the
+  // admin headline keeps its rank whatever else is set.
+  const policy = signInMessage(
+    new InteractionRequiredError('AADSTS53003.', ['ChannelMessage.Read.All'], false, false, true),
+  );
+  assert.match(policy, /^Blocked by missing tenant admin consent/);
+  assert.doesNotMatch(policy, /^Blocked by a Conditional Access policy/m);
+
+  const offline = signInMessage(
+    new InteractionRequiredError('ENOTFOUND.', ['ChannelMessage.Read.All'], false, false, false, true),
+  );
+  assert.match(offline, /^Blocked by missing tenant admin consent/);
+  assert.doesNotMatch(offline, /^Blocked by a network failure/m);
+});
+
+test('Conditional Access wins over missing consent', () => {
+  // Both can be set at once; the policy verdict is the more specific refusal.
+  const text = signInMessage(
+    new InteractionRequiredError('AADSTS53003 and consent missing.', [], false, true, true),
+  );
+
+  assert.match(text, /^Blocked by a Conditional Access policy/);
   assert.doesNotMatch(text, /^Blocked by missing consent —/m);
 });
 

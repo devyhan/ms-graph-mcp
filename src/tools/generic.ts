@@ -18,7 +18,14 @@ import type {
   ToolGroupMeta,
   ToolModule,
 } from '../contracts.js';
-import { ADMIN_CONSENT_SCOPES, GROUPS, loginScopesFor, scopesForGroups } from './groups.js';
+import {
+  ADMIN_CONSENT_SCOPES,
+  GROUPS,
+  excludeUpfrontBlocked,
+  loginScopesFor,
+  scopesForGroups,
+} from './groups.js';
+import { mapLoginFailure } from '../auth/provider.js';
 import { normalizeGraphPath } from '../util/paths.js';
 import { guessScopesForPath } from '../util/scopes.js';
 
@@ -137,6 +144,15 @@ const beginLoginInput = z.object({
       'Delegated scopes to consent to on top of the minimal sign-in set, e.g. ["Mail.Read"]. ' +
         'Omit it for the minimal set alone. When a tool fails for missing consent, pass the ' +
         'scopes its error names: Entra prompts only for what was added.',
+    ),
+  mode: z
+    .enum(['bare', 'full'])
+    .optional()
+    .describe(
+      'How much to consent to. Omit it (or pass "bare") for the minimal sign-in set plus ' +
+        '`scopes`. Pass "full" to consent up front to everything this configuration may need ' +
+        'except what an ordinary user cannot grant on their own: admin-consent and ' +
+        'tenant-policy-blocked scopes are left out rather than failing the whole prompt.',
     ),
 });
 
@@ -261,6 +277,21 @@ export const genericModule: ToolModule = {
       };
     }
 
+    /**
+     * The `mode: 'full'` ask: the full consent set from the server closure —
+     * already read-only aware and restricted to the enabled groups — minus
+     * what an ordinary user cannot grant, plus anything the caller named.
+     * The same set `upfrontScopesFor` computes from the catalogue.
+     */
+    function fullLoginScopes(extra?: readonly string[]): string[] {
+      const scopes = new Set(excludeUpfrontBlocked(consentScopes()));
+      for (const raw of extra ?? []) {
+        const scope = raw.trim();
+        if (scope !== '') scopes.add(scope);
+      }
+      return [...scopes].sort();
+    }
+
     const authTools: ToolDefinition[] = [
       {
         name: 'auth_begin_login',
@@ -276,8 +307,9 @@ export const genericModule: ToolModule = {
           'another browser window. Use it when a tool reports that there is no session, and ' +
           'again with `scopes` when a tool reports missing consent: sign-in is incremental, so ' +
           'a bare call asks only for the minimal set and each repeat consents to just what was ' +
-          'added. Never ask the user to paste credentials or an authorization code into ' +
-          'the conversation. No token is ever returned.',
+          'added. Pass `mode: "full"` to consent up front to the rest instead, minus what an ' +
+          'ordinary user cannot grant. Never ask the user to paste credentials or an ' +
+          'authorization code into the conversation. No token is ever returned.',
         inputSchema: beginLoginInput,
         scopes: [],
         group: GROUP.name,
@@ -286,8 +318,15 @@ export const genericModule: ToolModule = {
 
           // The minimal set plus whatever the caller named — the same rule the
           // CLI `login` applies. Consent grows one sign-in at a time instead of
-          // demanding the whole configuration up front.
-          const wanted = loginScopesFor(beginLoginInput.parse(args).scopes);
+          // demanding the whole configuration up front, unless the caller asked
+          // for `mode: 'full'`: the full consent set minus what an ordinary
+          // user cannot grant, so one prompt covers the rest without putting an
+          // ungrantable scope in charge of the entire sign-in.
+          const parsed = beginLoginInput.parse(args);
+          const wanted =
+            parsed.mode === 'full'
+              ? fullLoginScopes(parsed.scopes)
+              : loginScopesFor(parsed.scopes);
           const entry: BrowserLogin = {
             state: 'pending',
             startedAt: new Date().toISOString(),
@@ -305,7 +344,9 @@ export const genericModule: ToolModule = {
             },
             (error: unknown) => {
               entry.state = 'failed';
-              entry.detail = error instanceof Error ? error.message : String(error);
+              // Mapped, not raw: a bare AADSTS code in a status field says
+              // nothing about which knob to turn. Unknown stays verbatim.
+              entry.detail = mapLoginFailure(entry.scopes, error, config, config.authPort);
             },
           );
 
@@ -352,8 +393,9 @@ export const genericModule: ToolModule = {
         title: 'Check the session and consent',
         description:
           'Unified session and consent probe. Returns cached account (Entra ID, tenant, ' +
-          'consented scopes) plus live GET /me reachability. Call once first; on consent ' +
-          'errors sign in again with just the missing scopes.',
+          'consented scopes) plus whether the stored session still mints tokens and live ' +
+          'GET /me reachability. Call once first; on consent errors sign in again with ' +
+          'just the missing scopes.',
         inputSchema: z.object({}),
         scopes: [...GROUP.readScopes],
         group: GROUP.name,
@@ -370,9 +412,33 @@ export const genericModule: ToolModule = {
               'Could not read the cached account: ' +
               (error instanceof Error ? error.message : String(error));
           }
+          // Whether the cached session still mints tokens — the honest half of
+          // "signed in". A cached account whose refresh fails is exactly the
+          // state that used to report healthy while every call failed.
+          // Absent on scope-only catalogues, which must not call getToken here:
+          // that provider refuses, and a probe must not fail while probing.
+          let tokenUsable: boolean | null = null;
+          let sessionNote: string | undefined;
+          if (typeof auth.sessionHealth === 'function') {
+            try {
+              const health = await auth.sessionHealth();
+              tokenUsable = health.tokenUsable;
+              sessionNote = health.note;
+            } catch (error) {
+              tokenUsable = false;
+              sessionNote =
+                'Could not probe the session: ' +
+                (error instanceof Error ? error.message : String(error));
+            }
+          } else {
+            sessionNote =
+              'Token refresh was not probed: this catalogue was built to read scopes, not to use a session.';
+          }
           return {
             cachedAccount,
             ...(cacheNote === undefined ? {} : { cacheNote }),
+            tokenUsable,
+            ...(sessionNote === undefined ? {} : { sessionNote }),
             liveAccount: await describeSignedInAccount(graph),
             browserLogin: browserLogin ?? { state: 'none' as const },
             scopesRequested: consentScopes(),

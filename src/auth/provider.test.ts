@@ -16,8 +16,12 @@ import {
   describeSignInTarget,
   deviceCodeRejectedMessage,
   isAppUnavailable,
+  isConditionalAccess,
+  isLoopbackTimeout,
+  isNetworkFailure,
 } from './provider.js';
 import type { MsalPublicClient } from './provider.js';
+import type { PreflightChecks, PreflightResult } from './preflight.js';
 
 const SCOPES = ['User.Read'];
 
@@ -148,9 +152,39 @@ async function withCapturedStderr<T>(fn: () => Promise<T>): Promise<{ result: T;
   }
 }
 
+/**
+ * A preflight that reports everything usable, so the login tests below
+ * exercise MSAL behaviour rather than the machine they run on. Without it a
+ * headless CI box would short-circuit every browser attempt before MSAL is
+ * reached, and the fallback assertions would depend on DISPLAY.
+ */
+function preflightStub(
+  overrides: {
+    browser?: PreflightResult;
+    loopback?: PreflightResult;
+    reach?: PreflightResult;
+  } = {},
+): PreflightChecks {
+  return {
+    async canOpenBrowser() {
+      return overrides.browser ?? { verdict: 'possible', reason: 'stubbed: a browser can open' };
+    },
+    async canBindLoopback() {
+      return overrides.loopback ?? { verdict: 'possible', reason: 'stubbed: loopback binds' };
+    },
+    async canReachEntra() {
+      return overrides.reach ?? { verdict: 'possible', reason: 'stubbed: Entra answers' };
+    },
+  };
+}
+
 test('authFlow device never opens a browser', async () => {
   const client = fakeClient();
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'device' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   const { result: account } = await withCapturedStderr(() => provider.login(SCOPES));
 
@@ -162,7 +196,11 @@ test('authFlow device never opens a browser', async () => {
 
 test('authFlow browser propagates the failure instead of falling back', async () => {
   const client = fakeClient({ interactiveError: new Error('xdg-open ENOENT') });
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'browser' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'browser' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   const { stderr } = await withCapturedStderr(async () => {
     await assert.rejects(
@@ -187,6 +225,7 @@ test('the failure message names the pinned redirect URI when authPort is set', a
   const provider = createAuthProvider({
     config: configWith({ authFlow: 'browser', authPort: 4141 }),
     client,
+    preflight: preflightStub(),
   });
 
   await withCapturedStderr(async () => {
@@ -203,7 +242,11 @@ test('the failure message names the pinned redirect URI when authPort is set', a
 
 test('authFlow auto falls back to device code and says why', async () => {
   const client = fakeClient({ interactiveError: new Error('no display') });
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'auto' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   const { result: account, stderr } = await withCapturedStderr(() => provider.login(SCOPES));
 
@@ -216,7 +259,11 @@ test('authFlow auto falls back to device code and says why', async () => {
 
 test('authFlow auto stays on the browser when it succeeds', async () => {
   const client = fakeClient();
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'auto' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   await withCapturedStderr(() => provider.login(SCOPES));
 
@@ -226,7 +273,11 @@ test('authFlow auto stays on the browser when it succeeds', async () => {
 
 test('a caller can force browser sign-in without changing the configured flow', async () => {
   const client = fakeClient();
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'device' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   await withCapturedStderr(() => provider.login(SCOPES, 'browser'));
 
@@ -240,6 +291,7 @@ test('preferredPort is sent only when authPort is greater than zero', async () =
     createAuthProvider({
       config: configWith({ authFlow: 'browser', authPort: 4141 }),
       client: pinned,
+      preflight: preflightStub(),
     }).login(SCOPES),
   );
   assert.equal(pinned.interactive[0]?.preferredPort, 4141);
@@ -249,6 +301,7 @@ test('preferredPort is sent only when authPort is greater than zero', async () =
     createAuthProvider({
       config: configWith({ authFlow: 'browser', authPort: 0 }),
       client: ephemeral,
+      preflight: preflightStub(),
     }).login(SCOPES),
   );
   const request = ephemeral.interactive[0];
@@ -259,7 +312,11 @@ test('preferredPort is sent only when authPort is greater than zero', async () =
 test('the browser flow sends self-contained success and error pages', async () => {
   const client = fakeClient();
   await withCapturedStderr(() =>
-    createAuthProvider({ config: configWith({ authFlow: 'browser' }), client }).login(SCOPES),
+    createAuthProvider({
+      config: configWith({ authFlow: 'browser' }),
+      client,
+      preflight: preflightStub(),
+    }).login(SCOPES),
   );
 
   const request = client.interactive[0];
@@ -356,7 +413,7 @@ test('a silent refresh refused for missing consent names the scopes, not the ses
       assert.equal(err.tenantMismatch, false);
       assert.equal(err.adminScopes.length, 0);
       assert.match(err.message, /Blocked by missing consent for these scopes: User\.Read\./);
-      assert.match(err.message, /auth_begin_login.*`scopes`/);
+      assert.match(err.message, /auth_begin_login` with `\{"scopes": \["User\.Read"\]\}/);
       assert.match(err.message, /login --scopes User\.Read/);
       assert.match(err.message, /prompts only for what was added/);
       return true;
@@ -373,7 +430,9 @@ test('the legacy MS365_MCP_AUTH_FLOW=interactive value still selects the browser
     const client = fakeClient();
     // authFlow cast away to model a config object built before the field existed.
     const config = { ...BASE_CONFIG, authFlow: undefined as unknown as AuthFlow };
-    await withCapturedStderr(() => createAuthProvider({ config, client }).login(SCOPES));
+    await withCapturedStderr(() =>
+      createAuthProvider({ config, client, preflight: preflightStub() }).login(SCOPES),
+    );
     assert.equal(client.interactive.length, 1);
     assert.equal(client.device.length, 0);
   } finally {
@@ -442,6 +501,7 @@ for (const testCase of APP_UNAVAILABLE_CASES) {
       config: configWith({ authFlow: 'auto' }),
       clientIdSource: 'shipped',
       client,
+      preflight: preflightStub(),
     });
 
     const { stderr } = await withCapturedStderr(async () => {
@@ -474,6 +534,7 @@ test('an app-availability failure never falls back to the device code', async ()
     config: configWith({ authFlow: 'auto' }),
     clientIdSource: 'shipped',
     client,
+    preflight: preflightStub(),
   });
 
   const { stderr } = await withCapturedStderr(async () => {
@@ -491,6 +552,7 @@ test('the device flow explains an app-availability failure the same way', async 
     config: configWith({ authFlow: 'device' }),
     clientIdSource: 'shipped',
     client,
+    preflight: preflightStub(),
   });
 
   await withCapturedStderr(async () => {
@@ -508,7 +570,11 @@ test('the device flow explains an app-availability failure the same way', async 
 
 test('a browser failure still falls back and still blames the browser', async () => {
   const client = fakeClient({ interactiveError: new Error('spawn xdg-open ENOENT') });
-  const provider = createAuthProvider({ config: configWith({ authFlow: 'auto' }), client });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
 
   const { stderr } = await withCapturedStderr(() => provider.login(SCOPES));
 
@@ -600,6 +666,7 @@ test('login prints the sign-in target before opening the browser', async () => {
       config: configWith({ authFlow: 'browser' }),
       clientIdSource: 'shipped',
       client,
+      preflight: preflightStub(),
     }).login(SCOPES),
   );
 
@@ -617,6 +684,7 @@ test('the device flow names the application too', async () => {
       config: configWith({ authFlow: 'device' }),
       clientIdSource: 'flag',
       client,
+      preflight: preflightStub(),
     }).login(SCOPES),
   );
 
@@ -649,6 +717,7 @@ test('a refused device code stops instead of telling the user to open "undefined
     config: configWith({ authFlow: 'device' }),
     clientIdSource: 'flag',
     client,
+    preflight: preflightStub(),
   });
 
   const { stderr } = await withCapturedStderr(async () => {
@@ -679,6 +748,7 @@ test('auto does not fall back to a browser after the device code is refused', as
     config: configWith({ authFlow: 'device' }),
     clientIdSource: 'shipped',
     client,
+    preflight: preflightStub(),
   });
 
   await withCapturedStderr(async () => {
@@ -823,7 +893,7 @@ test('status moves from pending to signed in, and names the account', async () =
   assert.equal(done.account, ACCOUNT.username);
 });
 
-test('a refused sign-in reports failed, with the reason', async () => {
+test('a refused sign-in reports failed, with mapped guidance', async () => {
   const client = deferredDeviceClient(CODE);
   const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
 
@@ -833,6 +903,9 @@ test('a refused sign-in reports failed, with the reason', async () => {
 
   const status = await provider.deviceLoginStatus();
   assert.equal(status.state, 'failed');
+  // Mapped, not raw: the consent guidance, still quoting the code it mapped.
+  assert.match(String(status.detail), /refused at the consent screen/);
+  assert.match(String(status.detail), /Ask for less/);
   assert.match(String(status.detail), /AADSTS65004/);
 });
 
@@ -915,7 +988,18 @@ test('a failure before any code is issued rejects instead of waiting for ever', 
   } as unknown as FakeClient;
   const provider = createAuthProvider({ config: configWith({ authFlow: 'device' }), client });
 
-  await assert.rejects(() => provider.beginDeviceLogin(SCOPES), /ENOTFOUND/);
+  await assert.rejects(
+    () => provider.beginDeviceLogin(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      // Mapped, not raw: the network guidance, still quoting the failure it mapped.
+      assert.match(err.message, /Could not reach Microsoft Entra/);
+      assert.match(err.message, /will NOT fix this while the network is down/);
+      assert.match(err.message, /--use-env-proxy/);
+      assert.match(err.message, /ENOTFOUND/);
+      return true;
+    },
+  );
   // And it does not leave a dead flow behind claiming to be pending.
   assert.deepEqual(await provider.deviceLoginStatus(), { state: 'none' });
 });
@@ -962,4 +1046,411 @@ test('two sign-ins started at once share one code', async () => {
 
   assert.equal(started.length, 1, 'one flow, not two');
   assert.deepEqual(second, first);
+});
+
+// ---------------------------------------------------------------------------
+// Silent-refresh failures the fallthrough used to wrap raw
+// ---------------------------------------------------------------------------
+
+test('a Conditional Access block on the refresh names the browser retry, not a dead session', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error(
+      'AADSTS53003: Access has been blocked by Conditional Access policies. The access policy does not allow token issuance.',
+    ),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.conditionalAccess, true);
+      assert.equal(err.consentMissing, false);
+      assert.equal(err.tenantMismatch, false);
+      assert.deepEqual([...err.scopes], SCOPES);
+      assert.match(err.message, /Conditional Access policy \(AADSTS53003\)/);
+      assert.match(err.message, /auth_begin_login/);
+      assert.match(err.message, /device-code flow is commonly blocked/);
+      assert.match(err.message, /Scopes requested: User\.Read/);
+      return true;
+    },
+  );
+  assert.equal(client.interactive.length, 0);
+  assert.equal(client.device.length, 0);
+});
+
+test('a network failure on the refresh blames the route, not the session', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('getaddrinfo ENOTFOUND login.microsoftonline.com'),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.networkFailure, true);
+      assert.deepEqual([...err.scopes], SCOPES);
+      assert.match(err.message, /Could not reach Microsoft Entra/);
+      assert.match(err.message, /will NOT fix this while the network is down/);
+      assert.match(err.message, /--use-env-proxy/);
+      assert.match(err.message, /ENOTFOUND/);
+      return true;
+    },
+  );
+});
+
+test('a loopback timeout on the refresh points at the device flow', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('loopback_server_timeout: the redirect was never served'),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.loopbackTimeout, true);
+      assert.match(err.message, /timed out waiting for the loopback redirect/);
+      assert.match(err.message, /--auth-flow device/);
+      return true;
+    },
+  );
+});
+
+test('every silent-refresh failure records the scopes it asked for', async () => {
+  const client = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('interaction_required: the refresh token expired'),
+  });
+
+  await assert.rejects(
+    () => createAuthProvider({ config: BASE_CONFIG, client }).getToken(['Mail.Read', 'User.Read']),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.deepEqual([...err.scopes], ['Mail.Read', 'User.Read']);
+      return true;
+    },
+  );
+});
+
+test('the classifiers match whole failures only', () => {
+  assert.equal(isConditionalAccess(new Error('AADSTS53003: blocked by policy')), true);
+  assert.equal(isConditionalAccess(new Error('AADSTS530030: an unrelated code')), false);
+  assert.equal(
+    isNetworkFailure(new Error('getaddrinfo ENOTFOUND login.microsoftonline.com')),
+    true,
+  );
+  assert.equal(isNetworkFailure(new Error('fetch failed')), true);
+  assert.equal(isNetworkFailure(new Error('spawn xdg-open ENOENT')), false);
+  assert.equal(isNetworkFailure(new Error('no display')), false);
+  assert.equal(
+    isLoopbackTimeout(new Error('loopback_server_timeout: no redirect arrived')),
+    true,
+  );
+  assert.equal(isLoopbackTimeout(new Error('spawn xdg-open ENOENT')), false);
+});
+
+// ---------------------------------------------------------------------------
+// sessionHealth: the honest half of "signed in"
+// ---------------------------------------------------------------------------
+
+test('sessionHealth reports usable when the silent refresh succeeds', async () => {
+  const client = fakeClient({ accounts: [ACCOUNT] });
+  const provider = createAuthProvider({ config: BASE_CONFIG, client });
+
+  const health = await provider.sessionHealth?.();
+  assert.deepEqual(health, { tokenUsable: true });
+  assert.deepEqual(client.silent[0]?.scopes, ['User.Read', 'offline_access']);
+  assert.equal(client.interactive.length, 0);
+  assert.equal(client.device.length, 0);
+});
+
+test('sessionHealth reports unusable without signing out the cached account', async () => {
+  // Unlike getToken the probe must not evict what it probed: a transient probe
+  // failure must not turn the next data call into a sign-out.
+  const accountList = [ACCOUNT];
+  let silentError: Error | null = null;
+  const silent: unknown[] = [];
+  const client = {
+    async acquireTokenSilent(request: unknown) {
+      silent.push(request);
+      if (silentError) throw silentError;
+      return authResult();
+    },
+    async acquireTokenInteractive(): Promise<never> {
+      throw new Error('not exercised');
+    },
+    async acquireTokenByDeviceCode(): Promise<never> {
+      throw new Error('not exercised');
+    },
+    getTokenCache() {
+      return {
+        async getAllAccounts() {
+          return [...accountList];
+        },
+        async removeAccount() {
+          // not exercised
+        },
+      };
+    },
+    clearCache() {
+      // not exercised
+    },
+  } as unknown as FakeClient;
+  const provider = createAuthProvider({ config: BASE_CONFIG, client });
+
+  // A first success populates the shared cached account.
+  assert.equal(await provider.getToken(SCOPES), 'access-token');
+
+  // The probe fails against a transient refusal...
+  silentError = new Error('AADSTS65001: The user or admin has not consented to use the application.');
+  const health = await provider.sessionHealth?.(['Mail.Read']);
+  assert.equal(health?.tokenUsable, false);
+  assert.match(String(health?.note), /Missing consent for Mail\.Read/);
+  assert.match(String(health?.note), /AADSTS65001/);
+
+  // ...but the shared account survives it: empty the source and the next call
+  // still attempts a silent refresh from cache instead of reporting no account.
+  accountList.length = 0;
+  await assert.rejects(
+    () => provider.getToken(SCOPES),
+    (err: unknown) => {
+      assert.ok(err instanceof InteractionRequiredError);
+      assert.equal(err.consentMissing, true);
+      return true;
+    },
+  );
+  assert.equal(silent.length, 3, 'probe plus both data calls attempted silent refresh');
+});
+
+test('sessionHealth classifies Conditional Access and network failures', async () => {
+  const blocked = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('AADSTS53003: Access has been blocked by Conditional Access policies.'),
+  });
+  const blockedHealth = await createAuthProvider({ config: BASE_CONFIG, client: blocked }).sessionHealth?.();
+  assert.equal(blockedHealth?.tokenUsable, false);
+  assert.match(String(blockedHealth?.note), /Conditional Access blocked the silent refresh/);
+  assert.match(String(blockedHealth?.note), /sign in again in the browser/);
+
+  const offline = fakeClient({
+    accounts: [ACCOUNT],
+    silentError: new Error('getaddrinfo ENOTFOUND login.microsoftonline.com'),
+  });
+  const offlineHealth = await createAuthProvider({ config: BASE_CONFIG, client: offline }).sessionHealth?.();
+  assert.equal(offlineHealth?.tokenUsable, false);
+  assert.match(String(offlineHealth?.note), /unreachable/);
+});
+
+test('sessionHealth with no cached account reports not signed in', async () => {
+  const client = fakeClient();
+  const health = await createAuthProvider({ config: BASE_CONFIG, client }).sessionHealth?.();
+  assert.equal(health?.tokenUsable, false);
+  assert.match(String(health?.note), /not signed in/);
+  assert.equal(client.silent.length, 0, 'no account, no silent attempt');
+});
+
+// ---------------------------------------------------------------------------
+// Login failures the catches used to surface raw
+// ---------------------------------------------------------------------------
+
+test('a Conditional Access block in auto falls back with a warning, not silently', async () => {
+  const client = fakeClient({
+    interactiveError: new Error('AADSTS53003: Access has been blocked by Conditional Access policies.'),
+  });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
+
+  const { stderr } = await withCapturedStderr(() => provider.login(SCOPES));
+
+  assert.equal(client.interactive.length, 1);
+  assert.equal(client.device.length, 1);
+  assert.match(stderr, /blocked by a Conditional Access policy/);
+  assert.match(stderr, /commonly blocks too/);
+});
+
+test('a Conditional Access block in explicit browser mode stops with guidance', async () => {
+  const client = fakeClient({
+    interactiveError: new Error('AADSTS53003: Access has been blocked by Conditional Access policies.'),
+  });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'browser' }),
+    client,
+    preflight: preflightStub(),
+  });
+
+  await withCapturedStderr(async () => {
+    await assert.rejects(
+      () => provider.login(SCOPES),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /Conditional Access policy \(AADSTS53003\)/);
+        assert.match(err.message, /device-code flow is commonly blocked/);
+        return true;
+      },
+    );
+  });
+  assert.equal(client.device.length, 0, 'explicit browser never falls back');
+});
+
+test('a network failure during login never falls back into the same failure', async () => {
+  const client = fakeClient({
+    interactiveError: new Error('getaddrinfo ENOTFOUND login.microsoftonline.com'),
+  });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
+
+  await withCapturedStderr(async () => {
+    await assert.rejects(
+      () => provider.login(SCOPES),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /Could not reach Microsoft Entra/);
+        assert.match(err.message, /--use-env-proxy/);
+        return true;
+      },
+    );
+  });
+  assert.equal(client.device.length, 0, 'both grants need the same network');
+});
+
+test('a loopback timeout falls back to the device code, which needs no listener', async () => {
+  const client = fakeClient({
+    interactiveError: new Error('loopback_server_timeout: the redirect was never served'),
+  });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub(),
+  });
+
+  const { stderr } = await withCapturedStderr(() => provider.login(SCOPES));
+
+  assert.equal(client.interactive.length, 1);
+  assert.equal(client.device.length, 1);
+  assert.match(stderr, /timed out waiting for the loopback redirect/);
+  assert.match(stderr, /needs no loopback listener/);
+});
+
+test('the device grant maps policy and transport failures instead of surfacing them raw', async () => {
+  const blocked = fakeClient({
+    deviceError: new Error('AADSTS53003: Access has been blocked by Conditional Access policies.'),
+  });
+  await withCapturedStderr(async () => {
+    await assert.rejects(
+      () =>
+        createAuthProvider({
+          config: configWith({ authFlow: 'device' }),
+          client: blocked,
+          preflight: preflightStub(),
+        }).login(SCOPES),
+      /Conditional Access policy \(AADSTS53003\)/,
+    );
+  });
+
+  const offline = fakeClient({
+    deviceError: new Error('getaddrinfo ENOTFOUND login.microsoftonline.com'),
+  });
+  await withCapturedStderr(async () => {
+    await assert.rejects(
+      () =>
+        createAuthProvider({
+          config: configWith({ authFlow: 'device' }),
+          client: offline,
+          preflight: preflightStub(),
+        }).login(SCOPES),
+      /Could not reach Microsoft Entra/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-sign-in environment checks
+// ---------------------------------------------------------------------------
+
+test('auto skips the browser entirely when it verifiably cannot work', async () => {
+  const client = fakeClient();
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub({
+      browser: { verdict: 'impossible', reason: 'no desktop session (stubbed)' },
+    }),
+  });
+
+  const { result: account, stderr } = await withCapturedStderr(() => provider.login(SCOPES));
+
+  assert.equal(account.username, ACCOUNT.username);
+  assert.equal(client.interactive.length, 0, 'no doomed browser attempt');
+  assert.equal(client.device.length, 1);
+  assert.match(stderr, /Browser sign-in is unavailable \(no desktop session \(stubbed\)\)/);
+  assert.match(stderr, /using device code directly/);
+});
+
+test('explicit browser mode fails fast with the browser guidance when preflight rules it out', async () => {
+  const client = fakeClient();
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'browser' }),
+    client,
+    preflight: preflightStub({
+      loopback: { verdict: 'impossible', reason: 'loopback bind failed (stubbed)' },
+    }),
+  });
+
+  await withCapturedStderr(async () => {
+    await assert.rejects(
+      () => provider.login(SCOPES),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /^Browser sign-in failed: pre-sign-in check: /);
+        assert.match(err.message, /loopback bind failed \(stubbed\)/);
+        assert.match(err.message, /--auth-flow device/);
+        return true;
+      },
+    );
+  });
+  assert.equal(client.interactive.length, 0, 'MSAL is never reached');
+  assert.equal(client.device.length, 0, 'explicit browser never falls back');
+});
+
+test('an unknown preflight keeps the current behaviour', async () => {
+  const client = fakeClient({ interactiveError: new Error('no display') });
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'auto' }),
+    client,
+    preflight: preflightStub({
+      browser: { verdict: 'unknown', reason: 'a display is set but no browser was checked' },
+      loopback: { verdict: 'unknown', reason: 'the bind check itself failed' },
+    }),
+  });
+
+  const { stderr } = await withCapturedStderr(() => provider.login(SCOPES));
+
+  assert.equal(client.interactive.length, 1, 'the attempt goes ahead as before');
+  assert.equal(client.device.length, 1);
+  assert.match(stderr, /Browser sign-in failed: no display/);
+  assert.match(stderr, /Falling back to device code/);
+});
+
+test('an unreachable Entra warns but never stops the sign-in', async () => {
+  const client = fakeClient();
+  const provider = createAuthProvider({
+    config: configWith({ authFlow: 'device' }),
+    client,
+    preflight: preflightStub({
+      reach: { verdict: 'impossible', reason: 'no answer from Microsoft Entra (stubbed)' },
+    }),
+  });
+
+  const { result: account, stderr } = await withCapturedStderr(() => provider.login(SCOPES));
+
+  assert.equal(account.username, ACCOUNT.username);
+  assert.match(stderr, /no answer from Microsoft Entra \(stubbed\); sign-in will likely fail/);
 });

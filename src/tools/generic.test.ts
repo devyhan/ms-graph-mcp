@@ -9,6 +9,7 @@ import type {
   GraphRequestOptions,
   GraphResponse,
   ServerConfig,
+  SessionHealth,
   ToolDefinition,
 } from '../contracts.js';
 import { collectTools, exposedToolNames } from '../server.js';
@@ -72,6 +73,7 @@ function inertGraph(): GraphClient {
 function stubAuth(
   loginResult: Promise<AccountInfo> = new Promise(() => {}),
   account: AccountInfo | null = null,
+  health: SessionHealth | Error | 'absent' = 'absent',
 ): AuthProvider & {
   readonly asked: string[][];
   readonly flows: Array<string | undefined>;
@@ -101,6 +103,16 @@ function stubAuth(
     async deviceLoginStatus() {
       return { state: 'none' as const };
     },
+    // Omitted by default, like the scope-only provider: session_status must
+    // report "not probed" rather than calling getToken when it is absent.
+    ...(health === 'absent'
+      ? {}
+      : {
+          async sessionHealth() {
+            if (health instanceof Error) throw health;
+            return health;
+          },
+        }),
   };
 }
 
@@ -254,6 +266,49 @@ test('named scopes are added to the minimal set', async () => {
   assert.ok(!(auth.asked[0] as string[]).includes('Chat.Read'), 'nothing beyond the ask');
 });
 
+test('mode full consents up front minus what an ordinary user cannot grant', async () => {
+  // The middle ground between bare and ask-everything: the full consent set
+  // for the enabled groups, minus the admin-consent and tenant-policy-blocked
+  // scopes that would fail the whole prompt.
+  const auth = stubAuth();
+  const tools = toolsFor({ groups: ['me', 'mail', 'files'] }, auth);
+  const result = (await byName(tools, 'auth_begin_login').handler({ mode: 'full' })) as Record<
+    string,
+    unknown
+  >;
+
+  const asked = auth.asked[0] as string[];
+  assert.ok(asked.includes('User.Read'), 'the minimal set is included');
+  assert.ok(asked.includes('offline_access'), 'the minimal set is included');
+  assert.ok(asked.includes('Files.Read'), 'a grantable group scope is included');
+  assert.ok(asked.includes('Mail.Send'), 'a grantable write scope is included');
+  for (const blocked of ['Mail.Read', 'Mail.ReadWrite', 'MailboxSettings.Read', 'Files.Read.All']) {
+    assert.ok(!asked.includes(blocked), `${blocked} must be left out of the upfront ask`);
+  }
+  assert.deepEqual([...asked].sort(), asked, 'sorted');
+  assert.equal(auth.flows[0], 'browser');
+  assert.deepEqual(result['scopesRequested'], asked);
+});
+
+test('mode full still honours explicitly named scopes', async () => {
+  // Named means asked-for: silently dropping a scope the caller named would
+  // report success for a consent it thinks it requested.
+  const auth = stubAuth();
+  const tools = toolsFor({ groups: ['me', 'mail'] }, auth);
+  await byName(tools, 'auth_begin_login').handler({ mode: 'full', scopes: ['Chat.Read'] });
+
+  assert.ok((auth.asked[0] as string[]).includes('Chat.Read'));
+  assert.ok((auth.asked[0] as string[]).includes('Files.Read') === false);
+});
+
+test('mode bare behaves like the default', async () => {
+  const auth = stubAuth();
+  const tools = toolsFor({ groups: ['me', 'mail', 'files'] }, auth);
+  await byName(tools, 'auth_begin_login').handler({ mode: 'bare' });
+
+  assert.deepEqual([...(auth.asked[0] as string[])].sort(), [...MINIMAL_LOGIN_SCOPES].sort());
+});
+
 test('an empty scopes list is rejected rather than signed in bare', async () => {
   // Silently dropping to the minimal set would report success for a consent
   // the caller thinks it asked for. Zod rejects it before MSAL is reached.
@@ -311,6 +366,9 @@ test('a browser sign-in failure is reported without leaking credentials', async 
 
   const reported = await status.handler({});
   assert.equal((reported as Record<string, unknown>)['state'], 'failed');
+  // Mapped, not raw: the Conditional Access guidance, still quoting the code.
+  assert.match(String((reported as Record<string, unknown>)['detail']), /Conditional Access policy/);
+  assert.match(String((reported as Record<string, unknown>)['detail']), /prefer the browser/);
   assert.match(String((reported as Record<string, unknown>)['detail']), /AADSTS53003/);
   assert.doesNotMatch(JSON.stringify(reported), /accessToken|refreshToken|Bearer/);
 });
@@ -408,6 +466,57 @@ test('session_status survives a dead cache and a dead Graph', async () => {
   assert.equal(live['signedIn'], false);
   assert.ok(typeof live['note'] === 'string');
   assert.ok(Array.isArray(result['scopesRequested']));
+});
+
+test('session_status reports whether the stored session still mints tokens', async () => {
+  // The honest half of "signed in": a cached account whose refresh fails must
+  // not read as healthy.
+  const usable = toolsFor(
+    {},
+    stubAuth(new Promise(() => {}), ACCOUNT, { tokenUsable: true }),
+    meGraph({ id: 'user-id' }),
+  );
+  const good = (await byName(usable, 'session_status').handler({})) as Record<string, unknown>;
+  assert.equal(good['tokenUsable'], true);
+  assert.equal(good['sessionNote'], undefined);
+
+  const broken = toolsFor(
+    {},
+    stubAuth(new Promise(() => {}), ACCOUNT, {
+      tokenUsable: false,
+      note: 'Missing consent for Mail.Read; sign in again for just those scopes.',
+    }),
+    meGraph({ id: 'user-id' }),
+  );
+  const bad = (await byName(broken, 'session_status').handler({})) as Record<string, unknown>;
+  assert.equal(bad['tokenUsable'], false);
+  assert.match(String(bad['sessionNote']), /Missing consent for Mail\.Read/);
+  // And the cached account is still reported alongside: the two halves agree
+  // on what is wrong rather than one hiding the other.
+  assert.equal((bad['cachedAccount'] as Record<string, unknown>)['username'], ACCOUNT.username);
+  assert.doesNotMatch(JSON.stringify(bad), /accessToken|refreshToken|Bearer/);
+});
+
+test('session_status reports not probed when there is no session to probe', async () => {
+  // The scope-only catalogue refuses getToken; the probe must not call it.
+  const tools = toolsFor({}, scopeReadingOnlyAuth());
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  assert.equal(result['tokenUsable'], null);
+  assert.match(String(result['sessionNote']), /not probed/);
+  assert.match(String(result['cacheNote']), /read tool scopes/);
+});
+
+test('session_status survives a probe that throws', async () => {
+  const tools = toolsFor(
+    {},
+    stubAuth(new Promise(() => {}), ACCOUNT, new Error('probe blew up')),
+    meGraph({ id: 'user-id' }),
+  );
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  assert.equal(result['tokenUsable'], false);
+  assert.match(String(result['sessionNote']), /Could not probe the session/);
 });
 
 test('login status falls back to the cached account when no browser sign-in was started', async () => {

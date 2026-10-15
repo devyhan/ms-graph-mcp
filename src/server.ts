@@ -17,6 +17,7 @@ import type {
   ToolModule,
 } from './contracts.js';
 import { GraphError, InteractionRequiredError } from './contracts.js';
+import { isNetworkFailure, networkFailureMessage } from './auth/provider.js';
 import { packageVersion } from './config.js';
 import { GROUP_NAMES } from './tools/groups.js';
 import { buildDiscoveryTools } from './tools/discovery.js';
@@ -246,20 +247,72 @@ export function signInMessage(error: InteractionRequiredError): string {
     ].join('\n');
   }
 
-  // Missing consent is not a missing sign-in either, but unlike the two
-  // branches above, signing in again IS the fix: the session is fine, Entra
+  // A Conditional Access refusal is not a missing sign-in either, and like
+  // the tenant branch above, what actually occurred outranks what else might
+  // be missing — except admin consent, which still wins: every fix below
+  // fails until an administrator grants those scopes anyway.
+  if (error.conditionalAccess) {
+    return [
+      'Blocked by a Conditional Access policy — not by a missing sign-in.',
+      'The stored session is fine, but Microsoft Entra refused the request under a Conditional ' +
+        'Access policy (AADSTS53003): something this attempt did not satisfy — typically MFA, a ' +
+        'compliant device, or an approved app. Call `auth_begin_login` to sign in again in the ' +
+        'browser, which can complete interactive challenges such as MFA; ask the user to finish ' +
+        'there, then call `auth_login_status`. Do not offer the device-code flow for this one — ' +
+        'the same policy commonly blocks it too.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
+  // The request never reached Entra, so nothing about the session mattered.
+  // Signing in is the wrong verb here twice over: both grants need the same
+  // network, so this says to fix the route and retry the call instead.
+  if (error.networkFailure) {
+    return [
+      'Blocked by a network failure — not by a missing sign-in.',
+      'The request never reached Microsoft Entra (DNS, proxy, TLS, or offline), so nothing ' +
+        'about the session mattered. Tell the user to check the connection and retry the call; ' +
+        'signing in will not change the outcome while the route is down, so do not offer ' +
+        '`auth_begin_login` for this one. Behind a proxy, the server process may need node ' +
+        '--use-env-proxy before msal-node 6 will see it.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
+  // The browser flow's loopback redirect could not be served in time. Another
+  // browser attempt times out the same way; the device-code grant listens on
+  // nothing, so it is the way out.
+  if (error.loopbackTimeout) {
+    return [
+      'Blocked by a loopback redirect timeout — not by a missing sign-in.',
+      'The browser flow could not serve its loopback redirect in time (a firewall, a VPN, or ' +
+        'another process on the port). Retrying the same browser sign-in times out the same way: ' +
+        'from a terminal, `npx @devyhan/ms-graph-mcp login --auth-flow device` sidesteps the ' +
+        'listener entirely.',
+      `Detail: ${error.message}`,
+    ].join('\n');
+  }
+
+  // Missing consent is not a missing sign-in either, but unlike the branches
+  // above, signing in again IS the fix: the session is fine, Entra
   // just has no consent on record for the scopes the detail line names —
   // typically because this tool is used for the first time since sign-in. This
   // branch runs after the admin one because consent the tenant reserves to an
   // administrator fails the same way, and that headline must win.
   if (error.consentMissing) {
+    const pasteReady =
+      error.scopes.length > 0
+        ? ` Paste-ready: \`auth_begin_login\` with \`{"scopes": [${error.scopes.map((s) => JSON.stringify(s)).join(', ')}]}\`, or ` +
+          `\`npx @devyhan/ms-graph-mcp login --scopes ${error.scopes.join(',')}\`.`
+        : '';
     return [
       'Blocked by missing consent — not by a missing sign-in.',
       'The stored session is fine, but Microsoft Entra has no consent on record for the scopes ' +
         'this call asked for. Call `auth_begin_login` with those scopes in `scopes` to ' +
         'consent to just them: Entra prompts only for what was added. Ask the user to ' +
         'finish in the browser, then call `auth_login_status`. A terminal works too: ' +
-        '`npx @devyhan/ms-graph-mcp login --scopes …`.',
+        '`npx @devyhan/ms-graph-mcp login --scopes …`.' +
+        pasteReady,
       `Detail: ${error.message}`,
     ].join('\n');
   }
@@ -358,6 +411,23 @@ export function createServerFactory(deps: FactoryDeps): () => McpServer {
 function toolErrorText(name: string, error: unknown): string {
   if (error instanceof GraphError) return describeGraphError(error);
   if (error instanceof InteractionRequiredError) return signInMessage(error);
+
+  // A transport failure out of the Graph client is a plain Error, but it is a
+  // mapped one: the reader gets the network headline, not a bare ENOTFOUND.
+  // Anything unrecognised stays raw below.
+  if (error instanceof Error && isNetworkFailure(error)) {
+    logger.error('Tool failed.', { tool: name, stack: error.stack ?? error.message });
+    return signInMessage(
+      new InteractionRequiredError(
+        networkFailureMessage([], error.message),
+        [],
+        false,
+        false,
+        false,
+        true,
+      ),
+    );
+  }
 
   if (error instanceof Error) {
     logger.error('Tool failed.', { tool: name, stack: error.stack ?? error.message });

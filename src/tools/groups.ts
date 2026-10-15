@@ -300,6 +300,49 @@ export const ADMIN_CONSENT_SCOPES: ReadonlySet<string> = (() => {
 })();
 
 /**
+ * Delegated Graph scopes that the default Microsoft-managed tenant consent
+ * policy (`microsoft-user-default-recommended`, the default for new tenants
+ * since August 2025) withholds from ordinary users, even though the permissions
+ * reference marks every one of them `AdminConsentRequired: No`.
+ *
+ * This drives explanatory messages and the upfront scope set only, never a
+ * decision to skip a scope silently: Microsoft states the managed policy is
+ * updated on their schedule without any tenant-side change, so treating this
+ * list as authoritative would rot. The authority is always what Entra actually
+ * answers.
+ */
+export const TENANT_CONSENT_BLOCKED: ReadonlySet<string> = new Set([
+  'Calendars.Read',
+  'Calendars.ReadBasic',
+  'Calendars.ReadWrite',
+  'Calendars.Read.Shared',
+  'Calendars.ReadWrite.Shared',
+  'Chat.Read',
+  'Chat.ReadWrite',
+  'Contacts.ReadWrite',
+  'Contacts.Read.Shared',
+  'Contacts.ReadWrite.Shared',
+  'Files.Read.All',
+  'Files.ReadWrite.All',
+  'Mail.Read',
+  'Mail.ReadBasic',
+  'Mail.ReadWrite',
+  'Mail.Read.Shared',
+  'Mail.ReadWrite.Shared',
+  'MailboxSettings.Read',
+  'MailboxSettings.ReadWrite',
+  'OnlineMeetings.Read',
+  'OnlineMeetings.ReadWrite',
+  'People.Read',
+  'Sites.Read.All',
+  'Sites.ReadWrite.All',
+  'Tasks.Read',
+  'Tasks.Read.Shared',
+  'Tasks.ReadWrite',
+  'Tasks.ReadWrite.Shared',
+]);
+
+/**
  * The group a caller would enable to get a scope requested at login, preferring
  * one that needs no administrator when a scope appears in several.
  */
@@ -340,4 +383,43 @@ export function consentScopesFor(
     for (const scope of tool.scopes) scopes.add(scope);
   }
   return [...scopes].sort();
+}
+
+/**
+ * The consent set an upfront (`mode: 'full'`) sign-in asks for: the full set
+ * minus everything an ordinary user cannot grant on their own — the
+ * admin-consent scopes, the scopes the default managed tenant policy withholds,
+ * and extras declared by tools outside the enabled groups. Read-only aware the
+ * same way `consentScopesFor` is.
+ *
+ * A bare sign-in still asks for the minimal set alone (`loginScopesFor`); this
+ * is the middle ground for callers that want one prompt to cover the rest
+ * without putting an ungrantable scope in charge of the entire sign-in.
+ */
+export function upfrontScopesFor(
+  config: Pick<ServerConfig, 'groups' | 'readOnly'>,
+  tools: readonly ToolDefinition[],
+): string[] {
+  const enabled = new Set(config.groups);
+  const scopes = new Set(scopesForGroups(config.groups, config.readOnly));
+  for (const tool of tools) {
+    if (config.readOnly && tool.write === true) continue;
+    // The generic group is appended unconditionally, so its tools are always
+    // in; anything else outside the enabled groups is not this sign-in's ask.
+    if (tool.group !== 'generic' && !enabled.has(tool.group)) continue;
+    for (const scope of tool.scopes) scopes.add(scope);
+  }
+  return excludeUpfrontBlocked([...scopes]).sort();
+}
+
+/**
+ * Drops every scope an ordinary user cannot grant on their own: the
+ * admin-consent scopes and the ones the default managed tenant policy
+ * withholds. Shared by `upfrontScopesFor` and the `mode: 'full'` sign-in, so
+ * the upfront set is computed one way whatever path asks for it.
+ */
+export function excludeUpfrontBlocked(scopes: readonly string[]): string[] {
+  return scopes.filter(
+    (scope) => !ADMIN_CONSENT_SCOPES.has(scope) && !TENANT_CONSENT_BLOCKED.has(scope),
+  );
 }

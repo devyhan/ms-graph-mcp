@@ -285,10 +285,29 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
   return 0;
 }
 
-/** The signed-in account, or why it could not be read. Never throws. */
+/**
+ * The signed-in account plus whether it still mints tokens, or why it could
+ * not be read. Never throws.
+ *
+ * The suffix is the honest half of `status`: a cached account whose refresh
+ * fails must not read as healthy, which is exactly what it used to do while
+ * every call failed underneath it.
+ */
 async function currentAccount(config: ServerConfig): Promise<string> {
   try {
-    return describeAccount(await createAuthProvider({ config }).getAccount());
+    const auth = createAuthProvider({ config });
+    const account = await auth.getAccount();
+    if (!account) return describeAccount(null);
+    let health;
+    try {
+      health = await auth.sessionHealth?.();
+    } catch (error) {
+      return `${describeAccount(account)} (token check failed: ${describe(error)})`;
+    }
+    if (health === undefined) return describeAccount(account);
+    if (health.tokenUsable) return `${describeAccount(account)} (token usable)`;
+    const why = health.note !== undefined ? `: ${health.note}` : '';
+    return `${describeAccount(account)} (token unusable${why})`;
   } catch (error) {
     return `could not read the token cache: ${describe(error)}`;
   }

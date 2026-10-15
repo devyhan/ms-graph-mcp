@@ -26,9 +26,16 @@ import type {
   DeviceLoginPrompt,
   DeviceLoginStatus,
   ServerConfig,
+  SessionHealth,
 } from '../contracts.js';
-import { ADMIN_CONSENT_SCOPES, groupOwningScope } from '../tools/groups.js';
+import {
+  ADMIN_CONSENT_SCOPES,
+  TENANT_CONSENT_BLOCKED,
+  groupOwningScope,
+} from '../tools/groups.js';
 import { InteractionRequiredError } from '../contracts.js';
+import { defaultPreflight } from './preflight.js';
+import type { PreflightChecks } from './preflight.js';
 import { clearCache, createCachePlugin } from './token-cache.js';
 
 /**
@@ -62,48 +69,6 @@ function warn(message: string): void {
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
-
-/**
- * Delegated Graph scopes that the default Microsoft-managed tenant consent
- * policy (`microsoft-user-default-recommended`, the default for new tenants
- * since August 2025) withholds from ordinary users, even though the permissions
- * reference marks every one of them `AdminConsentRequired: No`.
- *
- * This drives an explanatory message only, never a decision to skip a scope:
- * Microsoft states the managed policy is updated on their schedule without any
- * tenant-side change, so treating this list as authoritative would rot. The
- * authority is always what Entra actually answers.
- */
-const TENANT_CONSENT_BLOCKED: ReadonlySet<string> = new Set([
-  'Calendars.Read',
-  'Calendars.ReadBasic',
-  'Calendars.ReadWrite',
-  'Calendars.Read.Shared',
-  'Calendars.ReadWrite.Shared',
-  'Chat.Read',
-  'Chat.ReadWrite',
-  'Contacts.ReadWrite',
-  'Contacts.Read.Shared',
-  'Contacts.ReadWrite.Shared',
-  'Files.Read.All',
-  'Files.ReadWrite.All',
-  'Mail.Read',
-  'Mail.ReadBasic',
-  'Mail.ReadWrite',
-  'Mail.Read.Shared',
-  'Mail.ReadWrite.Shared',
-  'MailboxSettings.Read',
-  'MailboxSettings.ReadWrite',
-  'OnlineMeetings.Read',
-  'OnlineMeetings.ReadWrite',
-  'People.Read',
-  'Sites.Read.All',
-  'Sites.ReadWrite.All',
-  'Tasks.Read',
-  'Tasks.Read.Shared',
-  'Tasks.ReadWrite',
-  'Tasks.ReadWrite.Shared',
-]);
 
 function toAccountInfo(account: MsalAccountInfo): AccountInfo {
   return {
@@ -233,17 +198,75 @@ function tenantMismatchMessage(
  * for the scopes asked for — typically AADSTS65001 for a tool used the first
  * time since sign-in. Unlike the tenant mismatch above, signing in again is
  * the fix, and Entra prompts only for what was added, so this names the scopes
- * instead of the session, with both ways to consent to just them.
+ * instead of the session, with both ways to consent to just them, each quoted
+ * exactly as it is typed — no placeholder the reader has to fill in.
  */
-function consentRequiredMessage(scopes: string[]): string {
+export function consentRequiredMessage(scopes: string[]): string {
   const list = scopes.length > 0 ? scopes.join(', ') : '(none)';
+  const toolArg = `{"scopes": [${scopes.map((s) => JSON.stringify(s)).join(', ')}]}`;
   return (
     `Blocked by missing consent for these scopes: ${list}. ` +
     'Sign in again for just these scopes — from a tool call, `auth_begin_login` with ' +
-    '`scopes`; from a terminal, `npx @devyhan/ms-graph-mcp login --scopes ' +
+    `\`${toolArg}\`; from a terminal, \`npx @devyhan/ms-graph-mcp login --scopes ` +
     `${scopes.join(',')}` +
     '` — and Entra prompts only for what was added.'
   );
+}
+
+/**
+ * What a caller reads when a Conditional Access policy blocked the refresh
+ * (AADSTS53003): the session is not dead, but the policy demands something a
+ * silent grant cannot do — MFA, a compliant or hybrid-joined device, an
+ * approved client app. Only an interactive browser sign-in can complete those
+ * challenges, so this retries the browser rather than the session, and warns
+ * that the device-code grant is commonly stopped by the same policy.
+ */
+export function conditionalAccessMessage(scopes: string[], detail: string): string {
+  const list = scopes.length > 0 ? scopes.join(', ') : '(none)';
+  return [
+    'Blocked by a Conditional Access policy (AADSTS53003): Microsoft Entra refused the request, not the session.',
+    'The policy needs something this attempt did not satisfy — typically MFA, a compliant device, or an approved app.',
+    'Sign in again in the browser — `auth_begin_login` from a tool call, `npx @devyhan/ms-graph-mcp login` from a terminal — which can complete interactive challenges such as MFA.',
+    'The device-code flow is commonly blocked by the same policy, so prefer the browser here.',
+    `Scopes requested: ${list}.`,
+    `Underlying error: ${detail}`,
+  ].join(' ');
+}
+
+/**
+ * What a caller reads when the request never reached Entra at all: DNS, proxy,
+ * TLS, or simply offline. Signing in again changes nothing while the route is
+ * down — both grants need the same network — so this says to fix the route and
+ * retry the call, and names the proxy trap: msal-node 6 uses the native fetch,
+ * which ignores proxy variables unless node itself runs with --use-env-proxy.
+ */
+export function networkFailureMessage(scopes: string[], detail: string): string {
+  const list = scopes.length > 0 ? scopes.join(', ') : '(none)';
+  return [
+    'Could not reach Microsoft Entra: the request failed before any sign-in state mattered.',
+    'Signing in again will NOT fix this while the network is down — check the connection and retry the call first.',
+    'Behind a proxy, note that msal-node 6 uses the native fetch, which ignores proxy environment variables unless node runs with --use-env-proxy.',
+    `Scopes requested: ${list}.`,
+    `Underlying error: ${detail}`,
+  ].join(' ');
+}
+
+/**
+ * What a caller reads when the browser flow's loopback redirect could not be
+ * served and MSAL gave up waiting (`loopback_server_timeout`). A firewall, a
+ * VPN that swallows loopback, or the pinned `--auth-port` taken by another
+ * process all do that. The device-code grant listens on nothing, so it is the
+ * way out rather than another browser attempt.
+ */
+export function loopbackTimeoutMessage(authPort: number, detail: string): string {
+  const port = authPort > 0 ? ` (--auth-port ${authPort})` : '';
+  return [
+    `Browser sign-in timed out waiting for the loopback redirect: ${detail}`,
+    'Likely causes:',
+    `  - The loopback listener could not be served${port}. A firewall, a VPN, or another process on the port will do that.`,
+    '  - The sign-in was never finished in the browser window that opened.',
+    'To sign in from another device instead, retry with --auth-flow device.',
+  ].join('\n');
 }
 
 /**
@@ -265,6 +288,68 @@ function consentRequiredMessage(scopes: string[]): string {
 function isRedirectUriProblem(err: unknown): boolean {
   const text = describeError(err);
   return /AADSTS900971(?!\d)/.test(text) || /AADSTS50011(?!\d)/.test(text);
+}
+
+/**
+ * True when Entra refused on consent grounds rather than because the browser
+ * leg failed. Every one of these reappears identically in the device-code
+ * flow, so falling back to it only makes the user refuse twice.
+ *
+ *   AADSTS65004  the user declined the consent screen
+ *   AADSTS65001  no consent recorded for this app or resource
+ *   AADSTS90093  the scopes need an administrator
+ *   AADSTS900941 admin consent required for the requested permissions
+ */
+export function isConsentDecision(err: unknown): boolean {
+  const text = describeError(err);
+  return (
+    /AADSTS(65004|65001|90093|900941)/.test(text) ||
+    /\baccess_denied\b/.test(text) ||
+    /\bconsent_required\b/.test(text)
+  );
+}
+
+/**
+ * True when a Conditional Access policy blocked the grant (AADSTS53003).
+ * Unlike a consent refusal this is not answered by asking for less: the
+ * policy wants an interactive challenge, so the browser — not the device
+ * code — is the retry.
+ */
+export function isConditionalAccess(err: unknown): boolean {
+  return /AADSTS53003(?!\d)/.test(describeError(err));
+}
+
+/**
+ * True when the request never reached Entra: DNS, connection, TLS, or a fetch
+ * that failed outright. Deliberately narrow — a browser-launch failure such
+ * as `spawn xdg-open ENOENT` is local, not network, and must keep falling
+ * back to the device code instead of being told to check the proxy.
+ */
+export function isNetworkFailure(err: unknown): boolean {
+  const text = describeError(err);
+  return (
+    /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENETDOWN|EHOSTDOWN|EPROTO|ERR_SOCKET_CLOSED)\b/.test(
+      text,
+    ) ||
+    /\bgetaddrinfo\b/.test(text) ||
+    /fetch failed/i.test(text) ||
+    /network (request failed|error|unreachable|timeout|is unreachable)/i.test(text) ||
+    /unable to resolve/i.test(text)
+  );
+}
+
+/**
+ * True when the browser flow's loopback redirect was never served and MSAL
+ * gave up waiting. Browser-only by construction: the device-code grant
+ * listens on nothing, so it sidesteps this one entirely.
+ */
+export function isLoopbackTimeout(err: unknown): boolean {
+  const text = describeError(err);
+  return (
+    /loopback_server_timeout/.test(text) ||
+    (/loopback/i.test(text) && /timed?\s?out/i.test(text)) ||
+    (/timed?\s?out/i.test(text) && /redirect/i.test(text))
+  );
 }
 
 function redirectUriMessage(authPort: number, detail: string): string {
@@ -293,6 +378,63 @@ function browserFailureMessage(authPort: number, detail: string): string {
     `  - The Entra app registration has no matching redirect URI. Add ${redirectUriFor(authPort)} under "Mobile and desktop applications".`,
     'To sign in from another device instead, retry with --auth-flow device.',
   ].join('\n');
+}
+
+/** What to tell someone whose consent screen was refused. */
+export function consentFailureMessage(scopes: string[], detail: string): string {
+  const blocked = scopes.filter((s) => TENANT_CONSENT_BLOCKED.has(s));
+  const lines = [
+    `Sign-in was refused at the consent screen: ${detail}`,
+    '',
+    `The app requested ${scopes.length} delegated permissions at once.`,
+    'Nothing was granted and no session was created.',
+    '',
+    'What usually fixes this:',
+    '  - Ask for less. A bare `login` asks only for the minimal set; consent to',
+    '    more with `login --scopes …` as tools need them, and Entra prompts again',
+    '    only for the permissions you add.',
+    '  - Add --read-only, which drops every write permission from a --full request.',
+  ];
+  if (blocked.length > 0) {
+    lines.push(
+      '',
+      `${blocked.length} of the requested permissions cannot be granted by an ordinary`,
+      'user under the default Microsoft-managed tenant consent policy, however small',
+      'the request is:',
+      ...blocked.map((s) => `    ${s}`),
+      '',
+      'An administrator grants those once, in Entra under the app registration:',
+      '  API permissions > Grant admin consent.',
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Maps a sign-in failure to the guidance its cause deserves, or returns the
+ * raw message when the cause is unrecognised.
+ *
+ * The provider's own catches classify inline so they can also decide about
+ * fallback; this is for the paths that only record a failure — the
+ * `auth_login_status` detail and the device-login status — where there is no
+ * fallback to decide, only a reader to inform. Unknown stays raw: inventing
+ * guidance for an error never seen is worse than quoting it.
+ */
+export function mapLoginFailure(
+  scopes: string[],
+  err: unknown,
+  config: Pick<ServerConfig, 'clientId' | 'tenantId'>,
+  authPort = 0,
+  source?: ClientIdSource,
+): string {
+  const detail = describeError(err);
+  if (isAppUnavailable(err)) return appUnavailableMessage(err, config, source);
+  if (isConsentDecision(err)) return consentFailureMessage(scopes, detail);
+  if (isConditionalAccess(err)) return conditionalAccessMessage(scopes, detail);
+  if (isNetworkFailure(err)) return networkFailureMessage(scopes, detail);
+  if (isLoopbackTimeout(err)) return loopbackTimeoutMessage(authPort, detail);
+  if (isRedirectUriProblem(err)) return redirectUriMessage(authPort, detail);
+  return detail;
 }
 
 /**
@@ -625,6 +767,45 @@ export function deviceCodeRejectedMessage(
   ].join('\n');
 }
 
+/** How long the session-health probe waits for MSAL before calling it unusable. */
+export const SESSION_HEALTH_TIMEOUT_MS = 8000;
+
+/** Rejects with `Error('timed out …')` when `promise` outlasts `ms`. Never throws itself. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    // Ref'd on purpose: an unref'd timer lets the event loop drain first, and
+    // the timeout that never fires is no timeout at all.
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * One line saying why the stored session cannot mint tokens, classifying by
+ * code the same way `getToken` does. A status note, not guidance: the reader
+ * is a status report, and the full message lives on the error itself.
+ */
+function healthNote(scopes: string[], err: unknown): string {
+  const detail = firstLine(describeError(err));
+  if (matchAppUnavailable(err)?.kind === 'single-tenant-common') {
+    return `Single-tenant application on a tenantless endpoint (AADSTS50194); set the owning tenant: ${detail}`;
+  }
+  if (isConditionalAccess(err)) {
+    return `Conditional Access blocked the silent refresh (AADSTS53003); sign in again in the browser: ${detail}`;
+  }
+  if (isConsentDecision(err)) {
+    return `Missing consent for ${scopes.length > 0 ? scopes.join(', ') : '(none)'}; sign in again for just those scopes: ${detail}`;
+  }
+  if (isNetworkFailure(err)) {
+    return `Microsoft Entra was unreachable; check the network and retry: ${detail}`;
+  }
+  if (isLoopbackTimeout(err)) {
+    return `The browser redirect timed out; retry with --auth-flow device: ${detail}`;
+  }
+  return `The stored session cannot be refreshed: ${detail}`;
+}
+
 /**
  * The slice of `PublicClientApplication` this provider uses. Declaring it keeps
  * the provider testable with a stub instead of a live MSAL client; production
@@ -650,8 +831,15 @@ export function createAuthProvider(opts: {
   clientIdSource?: ClientIdSource;
   /** Test seam. Omit in production to get a real `PublicClientApplication`. */
   client?: MsalPublicClient;
+  /**
+   * Pre-sign-in environment checks. Omit in production to probe the real
+   * environment; tests inject fakes so no check touches the network or the
+   * process environment.
+   */
+  preflight?: PreflightChecks;
 }): AuthProvider {
   const { config, clientIdSource } = opts;
+  const preflight: PreflightChecks = opts.preflight ?? defaultPreflight;
 
   const pca: MsalPublicClient =
     opts.client ??
@@ -688,55 +876,6 @@ export function createAuthProvider(opts: {
       throw new Error('Sign-in completed but no account was written to the token cache.');
     }
     return toAccountInfo(account);
-  }
-
-  /**
-   * True when Entra refused on consent grounds rather than because the browser
-   * leg failed. Every one of these reappears identically in the device-code
-   * flow, so falling back to it only makes the user refuse twice.
-   *
-   *   AADSTS65004  the user declined the consent screen
-   *   AADSTS65001  no consent recorded for this app or resource
-   *   AADSTS90093  the scopes need an administrator
-   *   AADSTS900941 admin consent required for the requested permissions
-   */
-  function isConsentDecision(err: unknown): boolean {
-    const text = describeError(err);
-    return (
-      /AADSTS(65004|65001|90093|900941)/.test(text) ||
-      /\baccess_denied\b/.test(text) ||
-      /\bconsent_required\b/.test(text)
-    );
-  }
-
-  /** What to tell someone whose consent screen was refused. */
-  function consentFailureMessage(scopes: string[], detail: string): string {
-    const blocked = scopes.filter((s) => TENANT_CONSENT_BLOCKED.has(s));
-    const lines = [
-      `Sign-in was refused at the consent screen: ${detail}`,
-      '',
-      `The app requested ${scopes.length} delegated permissions at once.`,
-      'Nothing was granted and no session was created.',
-      '',
-      'What usually fixes this:',
-      '  - Ask for less. A bare `login` asks only for the minimal set; consent to',
-      '    more with `login --scopes …` as tools need them, and Entra prompts again',
-      '    only for the permissions you add.',
-      '  - Add --read-only, which drops every write permission from a --full request.',
-    ];
-    if (blocked.length > 0) {
-      lines.push(
-        '',
-        `${blocked.length} of the requested permissions cannot be granted by an ordinary`,
-        'user under the default Microsoft-managed tenant consent policy, however small',
-        'the request is:',
-        ...blocked.map((s) => `    ${s}`),
-        '',
-        'An administrator grants those once, in Entra under the app registration:',
-        '  API permissions > Grant admin consent.',
-      );
-    }
-    return lines.join('\n');
   }
 
   /**
@@ -797,9 +936,32 @@ export function createAuthProvider(opts: {
     } catch (err) {
       // Reached both as the chosen flow and as the fallback. An app that is
       // absent or disabled is absent or disabled here too, so the same
-      // guidance applies rather than a raw AADSTS code.
+      // guidance applies rather than a raw AADSTS code — and so do the
+      // policy and transport failures, which the device grant meets head-on.
       throwIfAppUnavailable(err);
+      throwIfKnownGrantFailure(scopes, err);
       throw err;
+    }
+  }
+
+  /**
+   * Rethrows a policy or transport failure as guidance the user can act on.
+   * Shared by the blocking device grant and the tool-started one: both meet
+   * the same endpoint refusals, and both used to surface them raw.
+   */
+  function throwIfKnownGrantFailure(scopes: string[], err: unknown): void {
+    const detail = describeError(err);
+    if (isConsentDecision(err)) {
+      logStack(err);
+      throw new Error(consentFailureMessage(scopes, detail), { cause: err });
+    }
+    if (isConditionalAccess(err)) {
+      logStack(err);
+      throw new Error(conditionalAccessMessage(scopes, detail), { cause: err });
+    }
+    if (isNetworkFailure(err)) {
+      logStack(err);
+      throw new Error(networkFailureMessage(scopes, detail), { cause: err });
     }
   }
 
@@ -818,6 +980,8 @@ export function createAuthProvider(opts: {
         prompt: DeviceLoginPrompt;
         state: 'pending' | 'signedIn' | 'failed';
         detail?: string;
+        /** The scopes the in-flight attempt asks for, so a failure can map them into guidance. */
+        scopes: string[];
       }
     | null = null;
 
@@ -847,11 +1011,17 @@ export function createAuthProvider(opts: {
       failPrompt = reject;
     });
 
-    const entry: { prompt: DeviceLoginPrompt; state: 'pending' | 'signedIn' | 'failed'; detail?: string } = {
+    const entry: {
+      prompt: DeviceLoginPrompt;
+      state: 'pending' | 'signedIn' | 'failed';
+      detail?: string;
+      scopes: string[];
+    } = {
       // Replaced the moment the callback fires; `prompted` is what the caller
       // waits on, so this placeholder is never observable.
       prompt: { userCode: '', verificationUri: '', expiresAt: '', pollIntervalSeconds: 5 },
       state: 'pending',
+      scopes: [...scopes],
     };
 
     // Set BEFORE the call, not after it. MSAL may invoke deviceCodeCallback
@@ -898,14 +1068,17 @@ export function createAuthProvider(opts: {
         },
         (err: unknown) => {
           entry.state = 'failed';
-          entry.detail = describeError(err);
+          // Mapped, not raw: a bare AADSTS code in a status field says nothing
+          // about which knob to turn. Unknown failures still quote verbatim.
+          entry.detail = mapLoginFailure(entry.scopes, err, config, config.authPort, clientIdSource);
           // The caller may still be waiting for a code that is never coming:
           // MSAL rejects before the callback for anything that stops the device
           // authorization request itself — no network, a proxy or TLS failure, a
           // tenant that does not resolve. Without this the tool call waits for
           // ever, which is worse than the error it is hiding. Rejecting an
           // already-resolved promise is a no-op, so the normal path is
-          // unaffected.
+          // unaffected. The rejection stays raw here: the outer `beginDeviceLogin`
+          // maps it on the way out, once, with the same guidance.
           failPrompt(err);
           starting = null;
           // Nothing arrived, so there is no code to report a state for. Leaving
@@ -923,6 +1096,7 @@ export function createAuthProvider(opts: {
         return await beginDeviceLogin(scopes);
       } catch (err) {
         throwIfAppUnavailable(err);
+        throwIfKnownGrantFailure(scopes, err);
         throw err;
       }
     },
@@ -978,6 +1152,27 @@ export function createAuthProvider(opts: {
             tenantMismatchMessage(scopes, config, describeError(err)),
             adminOnly(scopes),
             true,
+            false,
+            false,
+            false,
+            false,
+            scopes,
+          );
+        }
+        // A Conditional Access refusal is not a dead session either: the
+        // refresh token is fine, but the policy demands an interactive
+        // challenge a silent grant cannot complete. Checked before consent —
+        // a policy verdict is the more specific refusal when both match.
+        if (isConditionalAccess(err)) {
+          throw new InteractionRequiredError(
+            conditionalAccessMessage(scopes, describeError(err)),
+            adminOnly(scopes),
+            false,
+            false,
+            true,
+            false,
+            false,
+            scopes,
           );
         }
         // A consent refusal is not a dead session either: the refresh token is
@@ -992,12 +1187,83 @@ export function createAuthProvider(opts: {
             adminOnly(scopes),
             false,
             true,
+            false,
+            false,
+            false,
+            scopes,
+          );
+        }
+        // The request never reached Entra: nothing about the session mattered,
+        // so the fix is the route, not another sign-in.
+        if (isNetworkFailure(err)) {
+          throw new InteractionRequiredError(
+            networkFailureMessage(scopes, describeError(err)),
+            adminOnly(scopes),
+            false,
+            false,
+            false,
+            true,
+            false,
+            scopes,
+          );
+        }
+        // A stale loopback error surfacing on the silent path (a cached
+        // failure, a proxy that answers for localhost): the browser leg is
+        // what timed out, not the session.
+        if (isLoopbackTimeout(err)) {
+          throw new InteractionRequiredError(
+            loopbackTimeoutMessage(config.authPort, describeError(err)),
+            adminOnly(scopes),
+            false,
+            false,
+            false,
+            false,
+            true,
+            scopes,
           );
         }
         throw new InteractionRequiredError(
           signInRequiredMessage(scopes, describeError(err)),
           adminOnly(scopes),
+          false,
+          false,
+          false,
+          false,
+          false,
+          scopes,
         );
+      }
+    },
+
+    async sessionHealth(scopes: string[] = ['User.Read']): Promise<SessionHealth> {
+      // Status only: whether the stored session still mints tokens. Unlike
+      // getToken this never clears the shared cached account — a probe that
+      // evicts what it probes would turn one transient failure into a
+      // sign-out — and it never throws for an unusable session.
+      let accounts: MsalAccountInfo[];
+      try {
+        accounts = await pca.getTokenCache().getAllAccounts();
+      } catch (error) {
+        return {
+          tokenUsable: false,
+          note: `Could not read the token cache: ${describeError(error)}`,
+        };
+      }
+      const account = accounts[0] ?? cachedAccount;
+      if (!account) {
+        return { tokenUsable: false, note: 'No cached account: not signed in.' };
+      }
+      try {
+        const result = await withTimeout(
+          pca.acquireTokenSilent({ account, scopes: withRefreshScope(scopes) }),
+          SESSION_HEALTH_TIMEOUT_MS,
+        );
+        if (!result.accessToken) {
+          return { tokenUsable: false, note: 'MSAL returned an empty access token.' };
+        }
+        return { tokenUsable: true };
+      } catch (err) {
+        return { tokenUsable: false, note: healthNote(scopes, err) };
       }
     },
 
@@ -1017,6 +1283,47 @@ export function createAuthProvider(opts: {
       // Which app is about to be granted access, while the user can still stop.
       log(describeSignInTarget(config, clientIdSource));
 
+      // Before MSAL opens anything: when the browser verifiably cannot work —
+      // no desktop session, no loopback listener — `auto` goes straight to the
+      // device code instead of failing through the browser first, and an
+      // explicit `browser` stops with the browser guidance instead of an MSAL
+      // timeout minutes later. `unknown` keeps the current behaviour: the
+      // attempt goes ahead as before.
+      if (flow === 'auto' || flow === 'browser') {
+        let blockers: string[] = [];
+        try {
+          const [browser, loopback] = await Promise.all([
+            preflight.canOpenBrowser(),
+            preflight.canBindLoopback(config.authPort),
+          ]);
+          blockers = [browser, loopback]
+            .filter((result) => result.verdict === 'impossible')
+            .map((result) => result.reason);
+        } catch {
+          blockers = [];
+        }
+        if (blockers.length > 0) {
+          const why = blockers.join('; ');
+          if (flow === 'browser') {
+            throw new Error(browserFailureMessage(config.authPort, `pre-sign-in check: ${why}`));
+          }
+          warn(`Browser sign-in is unavailable (${why}); using device code directly.`);
+          warn('Pass --auth-flow browser to fail instead of using device code.');
+          return accountFromResult(await loginByDeviceCode(scopes));
+        }
+      }
+
+      // Warn-only, every flow: a dead route fails both grants identically, and
+      // hearing it up front beats one timeout per grant. Never stops anything.
+      try {
+        const reach = await preflight.canReachEntra();
+        if (reach.verdict === 'impossible') {
+          warn(`${reach.reason}; sign-in will likely fail. Check the network and proxy, then retry.`);
+        }
+      } catch {
+        // The probe itself must never break a sign-in.
+      }
+
       if (flow === 'device') {
         return accountFromResult(await loginByDeviceCode(scopes));
       }
@@ -1033,13 +1340,43 @@ export function createAuthProvider(opts: {
         // Order matters, and it is not the obvious one. Classify WHAT Entra
         // refused before deciding what to do about the flow: a consent refusal
         // reported as "check your firewall and redirect URI" sends the user
-        // hunting through the portal for a problem that is not there. Both of
+        // hunting through the portal for a problem that is not there. All of
         // these checks therefore run ahead of the `flow === 'browser'` branch.
         throwIfAppUnavailable(err);
         if (isConsentDecision(err)) {
           // Identical in either flow — the device-code grant shows the same
           // consent screen — so there is nothing to fall back to.
           throw new Error(consentFailureMessage(scopes, detail), { cause: err });
+        }
+        if (isConditionalAccess(err)) {
+          // A policy block is about the grant, not the browser leg: the
+          // device grant meets the same policy, so `auto` falls back with a
+          // warning rather than failing — the policy may still let the device
+          // grant through, but commonly does not.
+          if (flow === 'browser') {
+            throw new Error(conditionalAccessMessage(scopes, detail), { cause: err });
+          }
+          warn(`Browser sign-in was blocked by a Conditional Access policy: ${detail}`);
+          warn(
+            'Falling back to device code, which the same policy commonly blocks too; prefer finishing the required challenge (MFA, compliant device) in the browser.',
+          );
+          return accountFromResult(await loginByDeviceCode(scopes));
+        }
+        if (isNetworkFailure(err)) {
+          // Both grants need the same network, so `auto` must not fall back
+          // into a second identical failure.
+          logStack(err);
+          throw new Error(networkFailureMessage(scopes, detail), { cause: err });
+        }
+        if (isLoopbackTimeout(err)) {
+          // Browser-only, like the reply-address problem below: the device
+          // grant listens on nothing, so it sidesteps this one entirely.
+          if (flow === 'browser') {
+            throw new Error(loopbackTimeoutMessage(config.authPort, detail), { cause: err });
+          }
+          warn(`Browser sign-in timed out waiting for the loopback redirect: ${detail}`);
+          warn('Falling back to device code, which needs no loopback listener.');
+          return accountFromResult(await loginByDeviceCode(scopes));
         }
         // A missing or mismatched reply address IS browser-only: the
         // device-code grant uses no redirect URI and succeeds against the same

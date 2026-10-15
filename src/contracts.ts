@@ -57,6 +57,27 @@ export interface AuthProvider {
   beginDeviceLogin(scopes: string[]): Promise<DeviceLoginPrompt>;
   /** Where a sign-in started by `beginDeviceLogin` has got to. Never a token. */
   deviceLoginStatus(): Promise<DeviceLoginStatus>;
+  /**
+   * Probes whether the stored session can still mint tokens, without needing
+   * interaction and without disturbing the cached account. Status only — never
+   * a token, and never throws for an unusable session.
+   *
+   * Optional so scope-only catalogues (see `scopeReadingOnlyAuth`) need not
+   * pretend to have a session to probe: callers that find it absent must report
+   * "not probed" rather than calling `getToken`, which refuses there.
+   */
+  sessionHealth?(scopes?: string[]): Promise<SessionHealth>;
+}
+
+/**
+ * Whether the stored session can still be refreshed.
+ *
+ * `tokenUsable` answers the question; `note` says why not (or what was not
+ * checked) in one line a status report can quote. Never carries a token.
+ */
+export interface SessionHealth {
+  tokenUsable: boolean;
+  note?: string | undefined;
 }
 
 /** What a person needs in order to finish a device-code sign-in. */
@@ -108,16 +129,50 @@ export class InteractionRequiredError extends Error {
    * those scopes is the fix; Entra prompts only for what was added.
    */
   readonly consentMissing: boolean;
+  /**
+   * True when a Conditional Access policy blocked the request (AADSTS53003).
+   * The session is not dead: the policy demands something a silent refresh
+   * cannot do (MFA, a compliant device), so signing in again in the browser —
+   * which can complete those challenges — is the fix, while the device-code
+   * flow is commonly blocked by the same policy.
+   */
+  readonly conditionalAccess: boolean;
+  /**
+   * True when the request never reached Entra (DNS, proxy, TLS, offline).
+   * Signing in again changes nothing while the network is down; retrying the
+   * call once it is back is the fix.
+   */
+  readonly networkFailure: boolean;
+  /**
+   * True when the browser flow's loopback redirect could not be served and
+   * timed out. The device-code flow needs no loopback listener, so it is the
+   * fix rather than another browser attempt.
+   */
+  readonly loopbackTimeout: boolean;
+  /**
+   * The scopes the failed call asked for, so a headline can echo them back in
+   * paste-ready form instead of gesturing at "the scopes the detail names".
+   * Empty when the raiser did not record them; headlines then stay generic.
+   */
+  readonly scopes: readonly string[];
   constructor(
     message: string,
     adminScopes: readonly string[] = [],
     tenantMismatch = false,
     consentMissing = false,
+    conditionalAccess = false,
+    networkFailure = false,
+    loopbackTimeout = false,
+    scopes: readonly string[] = [],
   ) {
     super(message);
     this.adminScopes = adminScopes;
     this.tenantMismatch = tenantMismatch;
     this.consentMissing = consentMissing;
+    this.conditionalAccess = conditionalAccess;
+    this.networkFailure = networkFailure;
+    this.loopbackTimeout = loopbackTimeout;
+    this.scopes = scopes;
   }
 }
 
