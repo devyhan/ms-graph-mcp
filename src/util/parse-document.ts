@@ -74,6 +74,12 @@ export interface ParsedUnit {
 
 export interface ParseManifest {
   units: Array<{ i: number; id: string; chars: number; truncated: boolean }>;
+  /**
+   * The whole-document outline: every unit's index, id and title, not just
+   * the returned slice, so the model can survey the document and fetch only
+   * the units it needs. Additive: nothing else in the manifest moved.
+   */
+  titles: Array<{ i: number; id: string; title?: string | undefined }>;
   unitCount: number;
   returnedRange: { from: number; to: number } | null;
   reason: 'complete' | 'maxItems';
@@ -305,6 +311,11 @@ export async function parseDocument(options: ParseOptions, deps: ParseDeps): Pro
   const reason = done ? 'complete' : 'maxItems';
   const manifest: ParseManifest = {
     units: units.map(({ i, id, chars, truncated }) => ({ i, id, chars, truncated })),
+    titles: extracted.units.map((unit, i) => ({
+      i,
+      id: unit.id,
+      ...(unit.title === undefined ? {} : { title: unit.title }),
+    })),
     unitCount: extracted.units.length,
     returnedRange: units.length === 0 ? null : { from: units[0]?.i ?? 0, to: (units[units.length - 1]?.i ?? 0) },
     reason,

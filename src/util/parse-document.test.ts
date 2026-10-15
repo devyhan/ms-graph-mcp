@@ -194,3 +194,28 @@ test('oversize and folder sources fail with friendly errors', async () => {
 test('a bogus cursor fails before any request', () => {
   assert.throws(() => decodeParseCursor('not-a-cursor!!'), /Invalid cursor/);
 });
+
+test('the manifest carries a whole-document titles outline beyond the slice', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  const result = await parseDocument(
+    { source: { driveId: 'DRIVE', itemId: 'ITEM' }, unitLimit: 1 },
+    deps(graph),
+  );
+  // The slice holds one unit, but the outline surveys all three.
+  assert.equal(result.units.length, 1);
+  assert.deepEqual(result.manifest.titles, [
+    { i: 0, id: 'page-1', title: 'Page 1' },
+    { i: 1, id: 'page-2', title: 'Page 2' },
+    { i: 2, id: 'page-3', title: 'Page 3' },
+  ]);
+  assert.equal(result.manifest.unitCount, 3);
+});
+
+test('untitled units appear in the outline without a title key', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  const result = await parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+    ...deps(graph),
+    extract: async () => ({ units: [{ id: 'p1', text: 'no heading here' }], warnings: [] }),
+  });
+  assert.deepEqual(result.manifest.titles, [{ i: 0, id: 'p1' }]);
+});

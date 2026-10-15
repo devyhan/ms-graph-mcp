@@ -10,7 +10,9 @@
  * What is deliberately NOT attempted, each mapped to a friendly error at the
  * call site: password/IRM/RMS-protected content, scanned-PDF OCR, legacy OLE
  * `.doc`/`.ppt`/`.xls`, formula evaluation (saved values are returned), and
- * pixel layout, borders, headers/footers and tracked changes.
+ * pixel layout and borders. Headers/footers, tracked insertions/deletions and
+ * cached chart/SmartArt values ARE extracted (as marked units, inline tags and
+ * resolved graphic lines); only uncached graphics fall back to a warning.
  */
 
 export type DocumentKind = 'docx' | 'xlsx' | 'pptx' | 'pdf';
@@ -120,6 +122,47 @@ export function isProtectionError(error: unknown): boolean {
     text.includes('rights') ||
     text.includes('drm')
   );
+}
+
+/**
+ * Renders row data as a Markdown table inside unit text — the one table shape
+ * every extractor agrees on, so the model never has to guess TSV-vs-pipes.
+ * The first row is the header (Markdown needs one); shorter rows are padded.
+ *
+ * A single-record block — one header plus exactly one data row over two or
+ * more columns — transposes to Field/Value form instead, which reads better
+ * than a wide table with one row and keeps the KV shape greppable:
+ *
+ *   | Field | Value |
+ *   | --- | --- |
+ *   | name | EMEA |
+ */
+export function toMarkdownTable(header: string[], rows: string[][]): string {
+  const width = Math.max(header.length, ...rows.map((row) => row.length));
+  if (width === 0) return '';
+  const pad = (cells: string[]): string[] => {
+    const out = cells.slice(0, width).map(mdCell);
+    while (out.length < width) out.push('');
+    return out;
+  };
+  const line = (cells: string[]): string => `| ${pad(cells).join(' | ')} |`;
+  if (rows.length === 1 && width >= 2) {
+    const values = pad(rows[0] ?? []);
+    const fields = pad(header).map((name, i) => (name === '' ? `Column ${i + 1}` : name));
+    return [
+      '| Field | Value |',
+      '| --- | --- |',
+      ...fields.map((name, i) => `| ${name} | ${values[i] ?? ''} |`),
+    ].join('\n');
+  }
+  return [line(header), `| ${Array.from({ length: width }, () => '---').join(' | ')} |`, ...rows.map(line)].join(
+    '\n',
+  );
+}
+
+/** Escapes one Markdown table cell: pipes break columns, newlines break rows. */
+function mdCell(text: string): string {
+  return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
 export function protectionRefusal(name: string): Error {
