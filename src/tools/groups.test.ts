@@ -7,6 +7,8 @@ import {
   MINIMAL_LOGIN_SCOPES,
   consentScopesFor,
   loginScopesFor,
+  resolveGroups,
+  resolveGroupsDetailed,
   upfrontScopesFor,
 } from './groups.js';
 
@@ -91,6 +93,29 @@ test('the upfront set ignores tools outside the enabled groups', () => {
 
   assert.ok(!upfront.includes('Chat.ReadWrite'), 'disabled-group extras are left out');
   assert.ok(upfront.includes('Files.Read'), 'generic tools are always in');
+});
+
+test('the detailed resolution reports admin-consent groups dropped without orgMode', () => {
+  const { groups, dropped } = resolveGroupsDetailed({
+    groups: ['mail', 'teams'],
+    orgMode: false,
+  });
+  assert.deepEqual(groups, ['mail']);
+  assert.deepEqual(dropped, ['teams']);
+});
+
+test('the detailed resolution drops nothing with orgMode', () => {
+  const { groups, dropped } = resolveGroupsDetailed({
+    groups: ['mail', 'teams'],
+    orgMode: true,
+  });
+  assert.deepEqual(groups, ['mail', 'teams']);
+  assert.deepEqual(dropped, []);
+});
+
+test('resolveGroups still returns only the kept groups', () => {
+  assert.deepEqual(resolveGroups({ groups: ['teams'], orgMode: false }), []);
+  assert.deepEqual(resolveGroups({ groups: ['teams'], orgMode: true }), ['teams']);
 });
 
 test('the upfront set never exceeds the full consent set', () => {

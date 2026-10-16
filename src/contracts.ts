@@ -391,6 +391,12 @@ export interface ServerConfig {
   graphHost: string;
   /** Names of the enabled tool groups. */
   groups: string[];
+  /**
+   * Requested groups dropped for needing tenant admin consent while orgMode
+   * is off. Optional so existing configs stay valid; `status` reports it so
+   * the Groups line names what was skipped and how to enable it.
+   */
+  droppedGroups?: string[];
   /** Suppress every write tool. */
   readOnly: boolean;
   /** Endpoint used when a tool does not specify one. */

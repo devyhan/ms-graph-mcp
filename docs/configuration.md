@@ -147,7 +147,7 @@ ms-graph-mcp [command] [options]
 | `status` | Print the signed-in account and the resolved configuration. |
 | `permissions` | Print the delegated scopes this configuration may request, grouped. |
 
-Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. Boolean environment variables accept `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`. An unrecognised flag is a hard error rather than a silent no-op.
+Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. Boolean environment variables accept `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`. Boolean flags accept the same values after `=` (for example `--read-only=false` switches off `MS365_MCP_READ_ONLY=true`); a bare flag still means true. Group names in `--groups` / `MS365_MCP_GROUPS` are case-insensitive, like `--preset`. An unrecognised flag is a hard error rather than a silent no-op.
 
 | Flag | Environment variable | Default | Effect |
 | --- | --- | --- | --- |
@@ -158,8 +158,8 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 | `--auth-port <n>` | `MS365_MCP_AUTH_PORT` | `0` | Loopback port for the browser flow's redirect. `0` lets the OS pick. |
 | `--scopes <a,b,c>` | | minimal set | Delegated scopes for `login` to request on top of the minimal set. |
 | `--full` | | off | Ask `login` for every scope the configuration may need. |
-| `--groups <a,b,c>` | `MS365_MCP_GROUPS` | see presets | Comma-separated tool groups to enable. |
-| `--preset <name>` | `MS365_MCP_PRESET` | `personal` | Group bundle: `personal`, `work`, `admin`, `all`. |
+| `--groups <a,b,c>` | `MS365_MCP_GROUPS` | see presets | Comma-separated tool groups to enable. Combines with `--preset`; their union is taken. |
+| `--preset <name>` | `MS365_MCP_PRESET` | `personal` | Group bundle: `personal`, `work`, `admin`, `all`. Combines with `--groups`; their union is taken. |
 | `--read-only` | `MS365_MCP_READ_ONLY` | off | Hide every tool that writes. |
 | `--org-mode` | `MS365_MCP_ORG_MODE` | off | Enable the groups whose scopes need tenant admin consent. |
 | `--discovery` | `MS365_MCP_DISCOVERY` | off | Expose `discover_tools` and `call_tool` instead of every tool. |

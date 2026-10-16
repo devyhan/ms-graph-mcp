@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { AuthFlow, OutputFormat, ServerConfig } from './contracts.js';
-import { GROUPS, GROUP_NAMES, PRESET_NAMES, PRESETS, resolveGroups } from './tools/groups.js';
+import { GROUPS, GROUP_NAMES, PRESET_NAMES, PRESETS, resolveGroupsDetailed } from './tools/groups.js';
 
 /** What the process should do once configuration is resolved. */
 export type Command =
@@ -403,13 +403,13 @@ const FLAGS: FlagSpec[] = [
     flag: '--groups',
     env: 'MS365_MCP_GROUPS',
     value: '<a,b,c>',
-    summary: 'Comma-separated tool groups to enable.',
+    summary: 'Comma-separated tool groups to enable; combines with --preset (union is taken).',
   },
   {
     flag: '--preset',
     env: 'MS365_MCP_PRESET',
     value: '<name>',
-    summary: `Group bundle: ${PRESET_NAMES.join(' | ')}.`,
+    summary: `Group bundle: ${PRESET_NAMES.join(' | ')}; combines with --groups (union is taken).`,
   },
   { flag: '--read-only', env: 'MS365_MCP_READ_ONLY', summary: 'Hide every tool that writes.' },
   {
@@ -465,6 +465,18 @@ const FLAGS: FlagSpec[] = [
 
 const VALUE_FLAGS = new Set(FLAGS.filter((f) => f.value !== undefined).map((f) => f.flag));
 
+/** Flags that mean true when bare and also accept an explicit `=true`/`=false`. */
+const BOOLEAN_FLAGS = new Set([
+  '--full',
+  '--read-only',
+  '--org-mode',
+  '--discovery',
+  '--beta',
+  '--allow-generic-write',
+  '--verbose',
+  '-v',
+]);
+
 const SUBCOMMANDS = ['serve', 'login', 'logout', 'status', 'permissions'] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -500,6 +512,22 @@ function envBool(env: NodeJS.ProcessEnv, key: string): boolean | undefined {
   if (FALSY.has(value)) return false;
   throw new ConfigError(
     `${key} must be one of 1/0, true/false, yes/no, on/off; got "${raw}".`,
+  );
+}
+
+/**
+ * Parses the `=value` on a boolean flag. Accepts the same vocabulary as the
+ * boolean environment variables, so `--read-only=false` switches off
+ * `MS365_MCP_READ_ONLY=true`. Only the `=value` form is read; a bare flag
+ * still means true and never consumes the next argument.
+ */
+function parseFlagBool(raw: string, name: string): boolean {
+  const value = raw.trim().toLowerCase();
+  if (TRUTHY.has(value)) return true;
+  if (FALSY.has(value)) return false;
+  throw new ConfigError(
+    `Option "${name}" takes an optional boolean value ` +
+      `(one of 1/0, true/false, yes/no, on/off); got "${raw}".`,
   );
 }
 
@@ -660,12 +688,12 @@ export function buildHelpText(): string {
   lines.push(
     '',
     'Examples:',
-    `  microsoft-graph-mcp login${id}`,
-    `  microsoft-graph-mcp login${id} --scopes Mail.Read,Calendars.Read`,
-    `  microsoft-graph-mcp${id} --preset work --read-only`,
-    `  microsoft-graph-mcp${id} --groups mail,calendar --verbose`,
-    `  microsoft-graph-mcp login${id} --auth-flow device`,
-    `  microsoft-graph-mcp login${id} --auth-flow browser --auth-port 8400`,
+    `  ms-graph-mcp login${id}`,
+    `  ms-graph-mcp login${id} --scopes Mail.Read,Calendars.Read`,
+    `  ms-graph-mcp${id} --preset work --read-only`,
+    `  ms-graph-mcp${id} --groups mail,calendar --verbose`,
+    `  ms-graph-mcp login${id} --auth-flow device`,
+    `  ms-graph-mcp login${id} --auth-flow browser --auth-port 8400`,
     '',
     'Groups flagged above need tenant admin consent and stay disabled without --org-mode.',
     hasShippedClientId()
@@ -674,7 +702,7 @@ export function buildHelpText(): string {
         'the consent step: many scopes still need a tenant administrator, and the shipped\n' +
         'application is registered in the global cloud only.'
       : 'This build ships no default application: pass --client-id <id> (or set\n' +
-        'MS365_MCP_CLIENT_ID) before login. Run `microsoft-graph-mcp status` for the\n' +
+        'MS365_MCP_CLIENT_ID) before login. Run `ms-graph-mcp status` for the\n' +
         'registration walkthrough.',
   );
 
@@ -825,15 +853,18 @@ function toParsedConfig(built: BuiltConfig, command: Command): ParsedConfig {
  * resolved config, the command to run, and where the client ID came from.
  */
 export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfig {
-  // Help and version short-circuit so they still work alongside a bad flag.
+  // Help and version short-circuit before any validation, so they print even
+  // alongside a bad flag or a bad environment value. The config they carry is
+  // defaults-only: neither command reads settings beyond the cache directory
+  // and verbosity used around printing.
   if (argv.includes('--help') || argv.includes('-h')) {
-    return toParsedConfig(buildConfig(fromEnv(env), env), {
+    return toParsedConfig(buildConfig({}, env), {
       kind: 'help',
       text: buildHelpText(),
     });
   }
   if (argv.includes('--version')) {
-    return toParsedConfig(buildConfig(fromEnv(env), env), { kind: 'version' });
+    return toParsedConfig(buildConfig({}, env), { kind: 'version' });
   }
 
   const raw = fromEnv(env);
@@ -864,7 +895,7 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
     const name = eq === -1 ? token : token.slice(0, eq);
     const inlineValue = eq === -1 ? undefined : token.slice(eq + 1);
 
-    if (inlineValue !== undefined && !VALUE_FLAGS.has(name)) {
+    if (inlineValue !== undefined && !VALUE_FLAGS.has(name) && !BOOLEAN_FLAGS.has(name)) {
       if (allFlagNames().includes(name)) {
         throw new ConfigError(`Option "${name}" does not take a value.`);
       }
@@ -922,26 +953,27 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
         raw.loginScopes = splitList(takeValue(), '--scopes', 'scope');
         break;
       case '--full':
-        raw.loginFull = true;
+        raw.loginFull = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--read-only':
-        raw.readOnly = true;
+        raw.readOnly = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--org-mode':
-        raw.orgMode = true;
+        raw.orgMode = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--discovery':
-        raw.discovery = true;
+        raw.discovery = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--beta':
-        raw.beta = true;
+        raw.beta = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--allow-generic-write':
-        raw.allowGenericWrite = true;
+        raw.allowGenericWrite =
+          inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       case '--verbose':
       case '-v':
-        raw.verbose = true;
+        raw.verbose = inlineValue === undefined ? true : parseFlagBool(inlineValue, name);
         break;
       default:
         throw unknownFlagError(name);
@@ -950,7 +982,27 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
 
   // Login-only arguments ride on the command, not the server config: `serve`
   // never reads them, and putting per-invocation asks next to the session
-  // settings would suggest it does.
+  // settings would suggest it does. On any other command they would silently
+  // do nothing, so name them on stderr instead of dropping them quietly. Only
+  // `--full` in its enabling form counts: an explicit `--full=false` asks for
+  // nothing even on `login`, so there is nothing lost to warn about.
+  if (subcommand !== 'login') {
+    const ignored: string[] = [];
+    if (raw.loginScopes !== undefined) ignored.push('--scopes');
+    if (raw.loginFull === true) ignored.push('--full');
+    if (ignored.length > 0) {
+      const flags = ignored.join(' and ');
+      const verb = ignored.length === 1 ? 'is' : 'are';
+      try {
+        process.stderr.write(
+          `[ms-graph-mcp] Warning: ${flags} ${verb} only used by \`login\` and ` +
+            `will be ignored for \`${subcommand}\`.\n`,
+        );
+      } catch {
+        // A closed stderr must not turn a clean parse into a crash.
+      }
+    }
+  }
   const command: Command =
     subcommand === 'login'
       ? {
@@ -991,11 +1043,14 @@ function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {
   });
 
   let groups: string[];
+  let droppedGroups: string[];
   try {
     const selection: { groups?: string[]; preset?: string; orgMode: boolean } = { orgMode };
     if (raw.groups !== undefined) selection.groups = raw.groups;
     if (raw.preset !== undefined) selection.preset = raw.preset;
-    groups = resolveGroups(selection);
+    const resolved = resolveGroupsDetailed(selection);
+    groups = resolved.groups;
+    droppedGroups = resolved.dropped;
   } catch (error) {
     throw new ConfigError(error instanceof Error ? error.message : String(error));
   }
@@ -1008,6 +1063,7 @@ function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {
       authority: `https://${cloud.authorityHost}/${tenantId}`,
       graphHost: cloud.graphHost,
       groups,
+      droppedGroups,
       readOnly: raw.readOnly ?? false,
       // Tools opt into beta explicitly; --beta only lifts the ban on doing so.
       graphVersion: 'v1.0',

@@ -272,6 +272,66 @@ test('--scopes rejects an empty list', () => {
   assert.throws(() => parseConfig(['login', '--scopes', ' , '], NO_ENV), /at least one scope/);
 });
 
+test('--scopes/--full outside login warn on stderr naming the ignored flags', () => {
+  const scoped = withCapturedStderr(() =>
+    parseConfig(['status', '--scopes', 'Mail.Read'], NO_ENV),
+  );
+  assert.deepEqual(scoped.result.command, { kind: 'status' });
+  assert.match(scoped.stderr, /--scopes/);
+  assert.match(scoped.stderr, /only used by `login`/);
+
+  // Bare serve (no subcommand given) warns the same way.
+  const serve = withCapturedStderr(() => parseConfig(['--scopes', 'Mail.Read'], NO_ENV));
+  assert.deepEqual(serve.result.command, { kind: 'serve' });
+  assert.match(serve.stderr, /--scopes/);
+
+  // --full alone names only --full.
+  const full = withCapturedStderr(() => parseConfig(['status', '--full'], NO_ENV));
+  assert.deepEqual(full.result.command, { kind: 'status' });
+  assert.match(full.stderr, /--full/);
+  assert.doesNotMatch(full.stderr, /--scopes/);
+
+  // Both together name both.
+  const both = withCapturedStderr(() =>
+    parseConfig(['permissions', '--scopes', 'Mail.Read', '--full'], NO_ENV),
+  );
+  assert.deepEqual(both.result.command, { kind: 'permissions' });
+  assert.match(both.stderr, /--scopes/);
+  assert.match(both.stderr, /--full/);
+});
+
+test('--scopes/--full on login, and bare commands, stay silent', () => {
+  // login consumes them, so there is nothing to warn about.
+  const login = withCapturedStderr(() =>
+    parseConfig(['login', '--scopes', 'Mail.Read', '--full'], NO_ENV),
+  );
+  assert.deepEqual(login.result.command, {
+    kind: 'login',
+    scopes: ['Mail.Read'],
+    full: true,
+  });
+  assert.equal(login.stderr, '');
+
+  // No login-only flags passed: no warning.
+  assert.equal(withCapturedStderr(() => parseConfig(['status'], NO_ENV)).stderr, '');
+  assert.equal(withCapturedStderr(() => parseConfig([], NO_ENV)).stderr, '');
+
+  // An explicit --full=false asks for nothing even on login, so ignoring it
+  // elsewhere loses nothing and stays silent.
+  assert.equal(
+    withCapturedStderr(() => parseConfig(['status', '--full=false'], NO_ENV)).stderr,
+    '',
+  );
+});
+
+test('help documents that --preset and --groups combine as a union', () => {
+  const help = parseConfig(['--help'], NO_ENV).command;
+  assert.equal(help.kind, 'help');
+  const text = help.kind === 'help' ? help.text : '';
+  assert.match(text, /--groups.*combines with --preset.*union is taken/);
+  assert.match(text, /--preset.*combines with --groups.*union is taken/);
+});
+
 test('--preset all drops admin-consent groups unless --org-mode is set', () => {
   const adminGroups = GROUP_NAMES.filter((name) => GROUPS[name]?.requiresAdminConsent === true);
   assert.deepEqual(adminGroups, ['teams', 'directory', 'intune']);
@@ -317,6 +377,43 @@ test('unknown groups are rejected and the valid ones listed', () => {
     },
   );
   assert.throws(() => parseConfig(['--preset', 'nope'], NO_ENV), /Unknown preset "nope"/);
+});
+
+test('--groups and MS365_MCP_GROUPS are case-insensitive, like --preset', () => {
+  const { config } = parseConfig(['--groups', 'MAIL,Calendar'], NO_ENV);
+  assert.deepEqual(config.groups, ['mail', 'calendar']);
+
+  const fromEnv = parseConfig([], { MS365_MCP_GROUPS: 'Mail, CALENDAR' });
+  assert.deepEqual(fromEnv.config.groups, ['mail', 'calendar']);
+
+  assert.throws(() => parseConfig(['--groups', 'NOPE'], NO_ENV), /Unknown tool group "NOPE"/);
+});
+
+test('boolean flags accept an explicit =true/=false value', () => {
+  assert.equal(parseConfig(['--read-only=false'], NO_ENV).config.readOnly, false);
+  assert.equal(parseConfig(['--read-only=true'], NO_ENV).config.readOnly, true);
+  assert.equal(parseConfig(['--read-only=0'], NO_ENV).config.readOnly, false);
+  assert.equal(parseConfig(['--read-only'], NO_ENV).config.readOnly, true);
+
+  // An explicit false switches off an env value the bare flag could never undo.
+  const switchedOff = parseConfig(['--read-only=false'], { MS365_MCP_READ_ONLY: 'true' });
+  assert.equal(switchedOff.config.readOnly, false);
+
+  assert.equal(parseConfig(['--beta=no'], NO_ENV).config.allowBeta, false);
+  assert.equal(parseConfig(['--org-mode=yes'], NO_ENV).config.orgMode, true);
+  assert.deepEqual(parseConfig(['login', '--full=off'], NO_ENV).command, { kind: 'login' });
+  assert.deepEqual(parseConfig(['login', '--full=on'], NO_ENV).command, {
+    kind: 'login',
+    full: true,
+  });
+
+  // A bare boolean flag never consumes the next argument.
+  const adjacent = parseConfig(['--read-only', '--verbose'], NO_ENV);
+  assert.equal(adjacent.config.readOnly, true);
+  assert.equal(adjacent.config.verbose, true);
+
+  assert.throws(() => parseConfig(['--read-only=bogus'], NO_ENV), /optional boolean value/);
+  assert.throws(() => parseConfig(['--read-only='], NO_ENV), /optional boolean value/);
 });
 
 test('cloud names map to the right Graph host and authority', () => {
@@ -366,6 +463,28 @@ test('help and version short-circuit without touching the rest of argv', () => {
   assert.equal(parseConfig(['permissions'], NO_ENV).command.kind, 'permissions');
   assert.equal(parseConfig(['logout'], NO_ENV).command.kind, 'logout');
   assert.throws(() => parseConfig(['frobnicate'], NO_ENV), /Unknown command "frobnicate"/);
+});
+
+test('help and version short-circuit a bad environment value', () => {
+  const badEnv: NodeJS.ProcessEnv = { MS365_MCP_READ_ONLY: 'maybe' };
+  // Real commands still fail fast on the same value.
+  assert.throws(() => parseConfig(['status'], badEnv), /MS365_MCP_READ_ONLY/);
+
+  const help = parseConfig(['--help'], badEnv);
+  assert.equal(help.command.kind, 'help');
+  assert.ok(help.command.kind === 'help' && help.command.text.includes('Usage:'));
+
+  const shortHelp = parseConfig(['-h'], badEnv);
+  assert.equal(shortHelp.command.kind, 'help');
+
+  const version = parseConfig(['--version'], badEnv);
+  assert.equal(version.command.kind, 'version');
+});
+
+test('version short-circuits an unknown flag', () => {
+  assert.throws(() => parseConfig(['status', '--bogus'], NO_ENV), /Unknown option "--bogus"/);
+  assert.equal(parseConfig(['--version', '--bogus'], NO_ENV).command.kind, 'version');
+  assert.equal(parseConfig(['--bogus', '--version'], NO_ENV).command.kind, 'version');
 });
 
 // ---------------------------------------------------------------------------
@@ -529,11 +648,16 @@ test('help tells the user which application sign-in will use', () => {
     // Registering is optional, and the examples must not imply otherwise.
     assert.match(text, /application shipped with this package/);
     assert.match(text, /consent step/);
-    assert.ok(!text.includes('microsoft-graph-mcp login --client-id <id>'));
+    assert.ok(!text.includes('ms-graph-mcp login --client-id <id>'));
   } else {
     assert.match(text, /ships no default application/);
-    assert.match(text, /microsoft-graph-mcp login --client-id <id>/);
+    assert.match(text, /ms-graph-mcp login --client-id <id>/);
   }
+
+  // The bin is ms-graph-mcp (package.json); microsoft-graph-mcp is only the
+  // MCP protocol server name and the legacy token-cache directory, neither of
+  // which is an invokable command. Every command in help must copy-paste.
+  assert.ok(!text.includes('microsoft-graph-mcp'));
 });
 
 // ---------------------------------------------------------------------------

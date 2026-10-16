@@ -8,6 +8,8 @@
  * stdout is the answer. `out()` is only ever called on the CLI paths.
  */
 
+import { access } from 'node:fs/promises';
+
 import type { AuthProvider, GraphClient, ServerConfig, ToolDefinition } from './contracts.js';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
@@ -25,7 +27,7 @@ import {
   parseConfig,
 } from './config.js';
 import { createGraphClient } from './graph/client.js';
-import { collectTools, createServerFactory } from './server.js';
+import { collectTools, createServerFactory, exposedTools } from './server.js';
 import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, loginScopesFor, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
 import { checkForUpdate } from './util/update-check.js';
@@ -158,6 +160,23 @@ function pad(label: string): string {
   return label.padEnd(16);
 }
 
+/**
+ * The `Groups:` value for `status`.
+ *
+ * Dropped groups are named inline with the remedy: the stderr warning alone
+ * left `status --groups teams` printing an empty `Groups: (+ generic)`, which
+ * reads as a bug rather than a consent decision.
+ */
+function groupsLine(config: ServerConfig): string {
+  const base = `${config.groups.join(', ')} (+ generic)`;
+  const dropped = config.droppedGroups ?? [];
+  if (dropped.length === 0) return base;
+  return (
+    `${base} (${dropped.join(', ')} skipped: needs tenant admin consent; ` +
+    'pass --org-mode to enable)'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -201,7 +220,7 @@ async function runLogin(parsed: ParsedConfig): Promise<number> {
     // The auth layer writes its user guidance INTO the message — which app was
     // refused, which tenant, which flag fixes it — and logs the MSAL stack to
     // stderr separately to keep it out of the way. Letting this reach the
-    // top-level handler would undo that: it prefixes "microsoft-graph-mcp
+    // top-level handler would undo that: it prefixes "ms-graph-mcp
     // failed:" and reprints the whole guidance as the first line of a stack
     // trace. Print the guidance, keep the stack behind --verbose.
     err(`${describe(error)}\n`);
@@ -214,9 +233,23 @@ async function runLogin(parsed: ParsedConfig): Promise<number> {
   return 0;
 }
 
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runLogout(parsed: ParsedConfig): Promise<number> {
   const { config } = parsed;
   const paths = cachePaths(config.cacheDir);
+  // Read before signing out: the report must name what was actually there, not
+  // what a cache directory usually holds.
+  const candidates = [paths.cacheFile, paths.keyFile];
+  const found = await Promise.all(candidates.map(exists));
+  const removed = candidates.filter((_, i) => found[i] === true);
   try {
     await createAuthProvider({ config, clientIdSource: parsed.clientIdSource }).logout();
   } catch (error) {
@@ -225,7 +258,11 @@ async function runLogout(parsed: ParsedConfig): Promise<number> {
     err(`MSAL sign-out failed (${describe(error)}); removing the cache files directly.\n`);
     await clearCache(config.cacheDir);
   }
-  out(`Signed out. Removed ${paths.cacheFile} and ${paths.keyFile}.\n`);
+  if (removed.length === 0) {
+    out(`No session found in ${config.cacheDir}: nothing to remove.\n`);
+    return 0;
+  }
+  out(`Signed out. Removed ${removed.join(' and ')}.\n`);
   return 0;
 }
 
@@ -245,7 +282,7 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
     return built;
   })();
 
-  out(`microsoft-graph-mcp ${packageVersion()}\n\n`);
+  out(`ms-graph-mcp ${packageVersion()}\n\n`);
   out(`${pad('Account:')}${unset ? 'no client ID configured' : await currentAccount(config)}\n`);
   // Never a stand-in GUID: a syntactically valid one looks configured, gets
   // copied into bug reports, and reaches Entra only to earn an AADSTS700038.
@@ -265,8 +302,12 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
       `, output ${config.output}\n`,
   );
   out(`${pad('Sign-in:')}${describeAuthFlow(config)}\n`);
-  out(`${pad('Groups:')}${config.groups.join(', ')} (+ generic)\n`);
-  out(`${pad('Tools:')}${tools.length}\n`);
+  out(`${pad('Groups:')}${groupsLine(config)}\n`);
+  // The exposed count, not the catalogue: under --read-only the write tools
+  // are suppressed, and under --discovery the client sees the discovery pair
+  // plus the always-exposed few. The Mode line above names the flags; this
+  // line reports what they leave visible.
+  out(`${pad('Tools:')}${exposedTools(tools, config).length}\n`);
   out(`${pad('Cache:')}${cachePaths(config.cacheDir).cacheFile}\n`);
 
   const scopes = consentScopes(config, tools);
@@ -316,6 +357,24 @@ async function currentAccount(config: ServerConfig): Promise<string> {
   }
 }
 
+/**
+ * Why a scope is listed under a group that does not obviously own it. Keys are
+ * `group:scope`; values are one short clause each, reusing the rationale from
+ * the source comment or docs footnote that already explains the attribution.
+ */
+const SCOPE_REASONS: Record<string, string> = {
+  'me:MailboxSettings.Read': 'me_get_mailbox_settings only',
+  'calendar:Calendars.Read.Shared': "other people's free/busy",
+  'files:Files.Read.All': "items in others' drives",
+  'files:Mail.Read': 'mail attachments (files_parse_document)',
+  'search:Mail.Read': 'message index',
+  'search:Files.Read': 'driveItem index',
+  'search:Sites.Read.All': 'driveItem/listItem/site indexes',
+  'search:Calendars.Read': 'event index',
+  'search:Chat.Read': 'chatMessage index',
+  'teams:TeamMember.Read.All': 'team roster only',
+};
+
 function runPermissions(config: ServerConfig): number {
   const tools = (() => {
     let built: ToolDefinition[] = [];
@@ -344,7 +403,9 @@ function runPermissions(config: ServerConfig): number {
     // overall and still carry one scope an administrator has to grant, and the
     // group-level flag alone sends people to argue about the wrong permission.
     for (const scope of group.scopes) {
-      out(`  ${scope}${ADMIN_CONSENT_SCOPES.has(scope) ? '   [admin]' : ''}\n`);
+      const reason = SCOPE_REASONS[`${group.name}:${scope}`];
+      const admin = ADMIN_CONSENT_SCOPES.has(scope) ? '   [admin]' : '';
+      out(`  ${scope}${admin}${reason !== undefined ? ` — ${reason}` : ''}\n`);
     }
   }
 
@@ -358,7 +419,10 @@ function runPermissions(config: ServerConfig): number {
   out(`${all.join(' ')}\n`);
 
   if (admin.length === 0) {
-    out('\nNone of these needs a tenant administrator: a signed-in user can consent to all of them.\n');
+    out(
+      "\nNone of these needs a tenant administrator under Microsoft's classification, " +
+        'though a tenant consent policy may still withhold some from ordinary users.\n',
+    );
     return 0;
   }
 
@@ -392,7 +456,7 @@ function runServe(parsed: ParsedConfig): void {
     // corrupts the session before the client has finished initializing.
     err(
       '\n**********************************************************************\n' +
-        '  microsoft-graph-mcp: NO ENTRA CLIENT ID CONFIGURED.\n' +
+        '  ms-graph-mcp: NO ENTRA CLIENT ID CONFIGURED.\n' +
         '  The server will start and list its tools, but every Graph call will\n' +
         '  fail. Pass --client-id <id> or set MS365_MCP_CLIENT_ID, then run\n' +
         '  `npx @devyhan/ms-graph-mcp login`.\n' +
@@ -516,6 +580,6 @@ main()
     if (code !== undefined) process.exit(code);
   })
   .catch((error: unknown) => {
-    err(`microsoft-graph-mcp failed: ${describeWithStack(error)}\n`);
+    err(`ms-graph-mcp failed: ${describeWithStack(error)}\n`);
     process.exit(1);
   });

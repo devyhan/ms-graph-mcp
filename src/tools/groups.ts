@@ -155,18 +155,19 @@ function unknownGroupError(name: string): Error {
 }
 
 /**
- * Turns `--groups` / `--preset` into the final enabled group list.
+ * Turns `--groups` / `--preset` into the final enabled group list plus the
+ * admin-consent groups dropped for lack of `orgMode`.
  *
  * Both selectors may be combined; their union is taken. Admin-consent groups
  * are dropped unless `orgMode` is set, because requesting those scopes on a
  * personal or unprivileged account produces a consent prompt the user cannot
  * approve.
  */
-export function resolveGroups(opts: {
+export function resolveGroupsDetailed(opts: {
   groups?: string[];
   preset?: string;
   orgMode: boolean;
-}): string[] {
+}): { groups: string[]; dropped: string[] } {
   const selected = new Set<string>();
   let explicit = false;
 
@@ -183,7 +184,7 @@ export function resolveGroups(opts: {
 
   if (opts.groups !== undefined && opts.groups.length > 0) {
     for (const raw of opts.groups) {
-      const name = raw.trim();
+      const name = raw.trim().toLowerCase();
       if (GROUPS[name] === undefined) throw unknownGroupError(raw);
       selected.add(name);
     }
@@ -195,7 +196,7 @@ export function resolveGroups(opts: {
   }
 
   const ordered = GROUP_NAMES.filter((name) => selected.has(name));
-  if (opts.orgMode) return ordered;
+  if (opts.orgMode) return { groups: ordered, dropped: [] };
 
   const kept: string[] = [];
   const dropped: string[] = [];
@@ -208,13 +209,27 @@ export function resolveGroups(opts: {
   if (dropped.length > 0) {
     // stdio transport owns stdout; diagnostics must go to stderr.
     process.stderr.write(
-      `[microsoft-graph-mcp] Skipping tool group(s) ${dropped.join(', ')}: ` +
+      `[ms-graph-mcp] Skipping tool group(s) ${dropped.join(', ')}: ` +
         'their Microsoft Graph scopes require tenant admin consent. ' +
         'Pass --org-mode (or MS365_MCP_ORG_MODE=1) to enable them.\n',
     );
   }
 
-  return kept;
+  return { groups: kept, dropped };
+}
+
+/**
+ * Turns `--groups` / `--preset` into the final enabled group list.
+ *
+ * Thin wrapper over {@link resolveGroupsDetailed} for callers that only need
+ * the kept groups. The stderr warning for dropped groups still fires.
+ */
+export function resolveGroups(opts: {
+  groups?: string[];
+  preset?: string;
+  orgMode: boolean;
+}): string[] {
+  return resolveGroupsDetailed(opts).groups;
 }
 
 /**
