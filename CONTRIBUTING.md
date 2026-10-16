@@ -72,7 +72,8 @@ the modules testable without a protocol in the way.
 - **Sign-in never happens inside a request.** `getToken` refreshes silently and
   throws `InteractionRequiredError` otherwise. It must not open a browser.
 - **No new dependencies** without a reason in the pull request. The dependency
-  list is three packages and staying small is deliberate for something that holds
+  list is eight packages (MSAL, the MCP SDK, zod, plus the five document-parsing
+  libraries) and staying small is deliberate for something that holds
   a mailbox token.
 - Match the surrounding style. Comments explain why, not what.
 

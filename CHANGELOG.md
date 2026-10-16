@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- README slimmed to an overview; detail sections moved to `docs/`
+  (auth, configuration, tools, examples, troubleshooting, security,
+  agents, why) with per-group usage examples.
+
 ## [0.5.0] - 2026-10-15
 
 ### Added

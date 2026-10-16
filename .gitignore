@@ -15,7 +15,17 @@ cache.key
 # engagement. Excluded from the public repository by the owner's decision:
 # they carry no identifiers, but they read as internal decision records and
 # would let a reader infer the context this was built in.
-docs/
+# The user-facing docs re-included below are the exception; anything else
+# under docs/ stays out.
+docs/*
+!docs/agents.md
+!docs/auth.md
+!docs/configuration.md
+!docs/examples.md
+!docs/security.md
+!docs/tools.md
+!docs/troubleshooting.md
+!docs/why.md
 
 # Contract-check artifacts: fetched Microsoft metadata, never committed.
 .graph-cache/
