@@ -7,11 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-16
+
+### Added
+
+- Per-group usage examples: every tool group now has a prompt-plus-call
+  example in `docs/examples.md`.
+- Boolean flags accept an explicit value: `--read-only=false` switches off
+  `MS365_MCP_READ_ONLY=true`, using the same vocabulary as the environment
+  variables.
+- `permissions` annotates cross-group scopes with a one-clause reason, so
+  `files -> Mail.Read` and the search index scopes explain themselves.
+
 ### Changed
 
 - README slimmed to an overview; detail sections moved to `docs/`
   (auth, configuration, tools, examples, troubleshooting, security,
-  agents, why) with per-group usage examples.
+  agents, why).
+- `status` reports the exposed tool count (36 under `--read-only`,
+  6 under `--discovery`) instead of the raw catalogue total.
+- `status` names dropped groups inline with the `--org-mode` remedy
+  instead of printing an empty group list.
+- `logout` with no session says nothing was removed rather than
+  claiming it deleted files.
+- `--groups` is case-insensitive, like `--preset`.
+- `--help` documents that `--preset` and `--groups` combine by union.
+- `permissions` closing line now distinguishes Microsoft's classification
+  from the tenant consent policy gate.
+
+### Fixed
+
+- Help examples used the nonexistent `microsoft-graph-mcp` command;
+  every user-facing command string now uses the real `ms-graph-mcp` bin.
+- A bad environment value no longer defeats `--help`/`--version`;
+  real commands still fail fast on it.
+- Non-`login` commands warn on stderr when `--scopes`/`--full` would
+  be silently ignored.
 
 ## [0.5.0] - 2026-10-15
 
