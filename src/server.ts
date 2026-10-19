@@ -273,8 +273,8 @@ export function signInMessage(error: InteractionRequiredError): string {
       'The request never reached Microsoft Entra (DNS, proxy, TLS, or offline), so nothing ' +
         'about the session mattered. Tell the user to check the connection and retry the call; ' +
         'signing in will not change the outcome while the route is down, so do not offer ' +
-        '`auth_begin_login` for this one. Behind a proxy, the server process may need node ' +
-        '--use-env-proxy before msal-node 6 will see it.',
+        '`auth_begin_login` for this one. Behind a proxy, the server honors proxy ' +
+        'environment variables automatically — tell the user to check that the proxy itself is reachable.',
       `Detail: ${error.message}`,
     ].join('\n');
   }

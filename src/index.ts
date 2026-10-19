@@ -8,6 +8,10 @@
  * stdout is the answer. `out()` is only ever called on the CLI paths.
  */
 
+// First: wraps the global fetch when a proxy is configured, before MSAL, the
+// graph client and the update check — all three resolve it per request.
+import './util/proxy-fetch.js';
+
 import { access } from 'node:fs/promises';
 
 import type { AuthProvider, GraphClient, ServerConfig, ToolDefinition } from './contracts.js';

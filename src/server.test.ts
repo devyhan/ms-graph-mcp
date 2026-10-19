@@ -125,7 +125,7 @@ test('a network failure retries the call, never the sign-in', () => {
   assert.match(text, /^Blocked by a network failure/);
   assert.match(text, /not by a missing sign-in/);
   assert.match(text, /do not offer `auth_begin_login`/);
-  assert.match(text, /--use-env-proxy/);
+  assert.match(text, /honors proxy environment variables/);
 });
 
 test('a loopback timeout names the device flow as the way out', () => {

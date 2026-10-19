@@ -9,4 +9,5 @@
 | Browser opens but redirect is rejected (`AADSTS50011`) | Registration has no `http://localhost` redirect URI | Add the **Mobile and desktop applications** platform — step 4 of registration |
 | Nothing opens, command sits there | No desktop session (SSH, container) | `login --auth-flow device` |
 | A plugin setting does not take effect | Placeholder was never substituted, or another source won | Run `status` and read the `Client ID from:` line |
+| `token unusable` / `ENOTFOUND` behind a proxy | Requests going direct instead of through the proxy | Fixed automatically: the server routes `fetch` through `HTTPS_PROXY`/`https_proxy`/`ALL_PROXY`/`all_proxy` at startup. If it persists, check the variable is set where the server runs (client `env`, not the shell profile), that `NO_PROXY` is not bypassing the host, and that stderr shows the `Proxying fetch requests via …` line — see [Proxy](configuration.md#proxy) |
 | Tool output looks cut off | Output exceeded `--max-output-chars` (default 60000) | Follow the `nextLink` / cursor, or raise the flag |

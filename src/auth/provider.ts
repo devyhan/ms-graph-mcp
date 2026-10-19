@@ -237,15 +237,16 @@ export function conditionalAccessMessage(scopes: string[], detail: string): stri
  * What a caller reads when the request never reached Entra at all: DNS, proxy,
  * TLS, or simply offline. Signing in again changes nothing while the route is
  * down — both grants need the same network — so this says to fix the route and
- * retry the call, and names the proxy trap: msal-node 6 uses the native fetch,
- * which ignores proxy variables unless node itself runs with --use-env-proxy.
+ * retry the call, and names the proxy behavior: the server honors proxy
+ * environment variables automatically, so a failure here means the proxy
+ * itself (or the route to it) is at fault, not a missing flag.
  */
 export function networkFailureMessage(scopes: string[], detail: string): string {
   const list = scopes.length > 0 ? scopes.join(', ') : '(none)';
   return [
     'Could not reach Microsoft Entra: the request failed before any sign-in state mattered.',
     'Signing in again will NOT fix this while the network is down — check the connection and retry the call first.',
-    'Behind a proxy, note that msal-node 6 uses the native fetch, which ignores proxy environment variables unless node runs with --use-env-proxy.',
+    'Behind a proxy, the server honors proxy environment variables automatically (HTTPS_PROXY/ALL_PROXY plus NO_PROXY); if this persists, check the proxy itself is reachable.',
     `Scopes requested: ${list}.`,
     `Underlying error: ${detail}`,
   ].join(' ');

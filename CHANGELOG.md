@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-19
+
+### Added
+
+- Proxy support: when `HTTPS_PROXY`/`https_proxy`/`ALL_PROXY`/`all_proxy`
+  is set, the global fetch is wrapped at startup (CONNECT tunneling for
+  HTTPS, absolute-form for HTTP, `NO_PROXY` honored), so Entra, Graph and
+  the update check work behind a proxy. One stderr line names the proxy
+  host when it activates. A malformed proxy value warns on stderr and falls
+  back to a direct connection instead of failing startup.
+
+### Fixed
+
+- Behind a proxy, sign-in and every Graph call failed with `ENOTFOUND`
+  (Node's `fetch` ignores proxy variables); requests now route through
+  the proxy automatically. See [Proxy](docs/configuration.md#proxy).
+
 ## [0.6.0] - 2026-10-16
 
 ### Added

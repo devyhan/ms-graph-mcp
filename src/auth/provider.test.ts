@@ -996,7 +996,7 @@ test('a failure before any code is issued rejects instead of waiting for ever', 
       // Mapped, not raw: the network guidance, still quoting the failure it mapped.
       assert.match(err.message, /Could not reach Microsoft Entra/);
       assert.match(err.message, /will NOT fix this while the network is down/);
-      assert.match(err.message, /--use-env-proxy/);
+      assert.match(err.message, /honors proxy environment variables/);
       assert.match(err.message, /ENOTFOUND/);
       return true;
     },
@@ -1094,7 +1094,7 @@ test('a network failure on the refresh blames the route, not the session', async
       assert.deepEqual([...err.scopes], SCOPES);
       assert.match(err.message, /Could not reach Microsoft Entra/);
       assert.match(err.message, /will NOT fix this while the network is down/);
-      assert.match(err.message, /--use-env-proxy/);
+      assert.match(err.message, /honors proxy environment variables/);
       assert.match(err.message, /ENOTFOUND/);
       return true;
     },
@@ -1314,7 +1314,7 @@ test('a network failure during login never falls back into the same failure', as
       (err: unknown) => {
         assert.ok(err instanceof Error);
         assert.match(err.message, /Could not reach Microsoft Entra/);
-        assert.match(err.message, /--use-env-proxy/);
+        assert.match(err.message, /honors proxy environment variables/);
         return true;
       },
     );

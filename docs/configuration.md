@@ -175,3 +175,39 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 `MS365_MCP_AUTH_FLOW=interactive`, the undocumented value that used to select the browser flow, is still accepted as an alias for `browser`.
 
 `--discovery` is worth knowing about: with every group enabled the server exposes 111 tools, and 111 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees six tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, `graph_list_permissions` reports the configuration, `session_status` probes the session, and `auth_begin_login` with `auth_login_status` sign you in. The last three are exposed here deliberately: a caller with no session cannot reach a tool through `call_tool` that it has not discovered yet, and signing in is the first thing such a caller needs. The model pays for a tool's schema only when it actually calls it.
+
+## Proxy
+
+Node's `fetch` ignores proxy variables, so without help every Entra and Graph
+call fails behind a proxy while curl and npm work. The server wraps the global
+`fetch` once at startup, which routes sign-in (MSAL), Graph calls, and the
+update check through the proxy — there is no flag to pass. Set the variables
+in the environment that launches the server process: for a desktop-launched
+MCP client that means the client's `env` map, not your shell profile.
+
+The first usable value wins, in this order: `HTTPS_PROXY`, `https_proxy`,
+`ALL_PROXY`, `all_proxy`. `HTTP_PROXY` is deliberately ignored — only the
+HTTPS-capable variables route. A bare `host:port` gains the `http://` scheme
+curl would assume, and credentials in the URL (`http://user:pass@host:port`)
+are sent as `Proxy-Authorization`.
+
+`NO_PROXY` (or lowercase `no_proxy`) is a comma-separated list of hostnames
+that bypass the proxy. `*` bypasses everything; otherwise a rule matches its
+exact host and every subdomain of it, case-insensitively, with an optional
+leading dot ignored — `example.com` covers `api.example.com` but not
+`example.com.evil.net`. Rules are hostnames only: ports and CIDR ranges are
+not matched.
+
+Anything outside the proxy's reach — no proxy variable set, a `NO_PROXY`
+match, a non-HTTP(S) URL — goes direct through the native fetch, as do
+redirect hops that land on a bypassed host. A malformed proxy value, or a
+scheme that cannot serve a tunnel such as `socks5:`, warns on stderr and falls
+back to a direct connection rather than failing startup; proxy setup can never
+take the server down.
+
+When proxying activates, one line on stderr names the proxy host and the
+variable it came from (never the credentials):
+
+```
+[graph-mcp] INFO Proxying fetch requests via 127.0.0.1:8080 (from $HTTPS_PROXY).
+```
