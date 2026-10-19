@@ -26,6 +26,7 @@ import {
   scopesForGroups,
 } from './groups.js';
 import { mapLoginFailure } from '../auth/provider.js';
+import { readIdentity } from '../auth/token-cache.js';
 import { normalizeGraphPath } from '../util/paths.js';
 import { guessScopesForPath } from '../util/scopes.js';
 
@@ -395,7 +396,8 @@ export const genericModule: ToolModule = {
           'Unified session and consent probe. Returns cached account (Entra ID, tenant, ' +
           'consented scopes) plus whether the stored session still mints tokens and live ' +
           'GET /me reachability. Call once first; on consent errors sign in again with ' +
-          'just the missing scopes.',
+          'just the missing scopes. Includes the login-time cached identity when present, ' +
+          'read from disk without a Graph call.',
         inputSchema: z.object({}),
         scopes: [...GROUP.readScopes],
         group: GROUP.name,
@@ -411,6 +413,35 @@ export const genericModule: ToolModule = {
             cacheNote =
               'Could not read the cached account: ' +
               (error instanceof Error ? error.message : String(error));
+          }
+          // The login-time snapshot, read from disk: no Graph call, so this
+          // leg stays offline. Projected to what a reader can act on — the
+          // account id, client id, and authority stay in the file. A snapshot
+          // naming a different account than the live one is stale (another
+          // process signed in since), so it reads as absent.
+          let cachedIdentity: {
+            username: string;
+            name?: string;
+            tenantId?: string;
+            capturedAt: string;
+            source: 'msal-account' | 'graph-me';
+          } | null = null;
+          try {
+            const snapshot = await readIdentity(config.cacheDir);
+            if (
+              snapshot !== null &&
+              (cachedAccount === null || snapshot.homeAccountId === cachedAccount.homeAccountId)
+            ) {
+              cachedIdentity = {
+                username: snapshot.username,
+                ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
+                ...(snapshot.tenantId === undefined ? {} : { tenantId: snapshot.tenantId }),
+                capturedAt: snapshot.capturedAt,
+                source: snapshot.source,
+              };
+            }
+          } catch {
+            cachedIdentity = null;
           }
           // Whether the cached session still mints tokens — the honest half of
           // "signed in". A cached account whose refresh fails is exactly the
@@ -437,6 +468,7 @@ export const genericModule: ToolModule = {
           return {
             cachedAccount,
             ...(cacheNote === undefined ? {} : { cacheNote }),
+            cachedIdentity,
             tokenUsable,
             ...(sessionNote === undefined ? {} : { sessionNote }),
             liveAccount: await describeSignedInAccount(graph),

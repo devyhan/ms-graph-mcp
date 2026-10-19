@@ -143,7 +143,7 @@ ms-graph-mcp [command] [options]
 | --- | --- |
 | `serve` | Run the MCP server on stdio. The default when no command is given. |
 | `login` | Sign in and write the token cache. Asks only for the minimal scopes unless `--scopes` / `--full` widen it. Opens a browser by default; see `--auth-flow`. |
-| `logout` | Clear the stored token cache. |
+| `logout` | Clear the stored session: token cache, key, and identity snapshot. |
 | `status` | Print the signed-in account and the resolved configuration. |
 | `permissions` | Print the delegated scopes this configuration may request, grouped. |
 

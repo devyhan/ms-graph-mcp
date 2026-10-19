@@ -12,9 +12,11 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ICachePlugin, TokenCacheContext } from '@azure/msal-node';
+import type { IdentityRecord } from '../contracts.js';
 
 const CACHE_FILE = 'token-cache.enc';
 const KEY_FILE = 'cache.key';
+const IDENTITY_FILE = 'identity-cache.enc';
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -48,7 +50,7 @@ function describeError(err: unknown): string {
  */
 const locks = new Map<string, Promise<unknown>>();
 
-function runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+export function runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const previous = locks.get(key) ?? Promise.resolve();
   // Run regardless of how the predecessor settled, so one failure cannot wedge
   // the chain for the life of the process.
@@ -84,7 +86,7 @@ async function writeSecret(path: string, contents: string): Promise<void> {
  * processes racing on first run agree on a single key instead of each clobbering
  * the other's.
  */
-async function loadOrCreateKey(cacheDir: string): Promise<Buffer> {
+export async function loadOrCreateKey(cacheDir: string): Promise<Buffer> {
   const keyPath = join(cacheDir, KEY_FILE);
 
   const existing = await readKey(keyPath);
@@ -128,14 +130,14 @@ async function readKey(keyPath: string): Promise<Buffer | null> {
   return key;
 }
 
-function encrypt(key: Buffer, plaintext: string): string {
+export function encrypt(key: Buffer, plaintext: string): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64');
 }
 
-function decrypt(key: Buffer, encoded: string): string {
+export function decrypt(key: Buffer, encoded: string): string {
   const blob = Buffer.from(encoded.trim(), 'base64');
   if (blob.length <= IV_BYTES + TAG_BYTES) {
     throw new Error('cache blob is too short to contain an IV and auth tag');
@@ -158,6 +160,97 @@ async function discardCache(cachePath: string, reason: string): Promise<void> {
       warn(`could not delete the unreadable token cache: ${describeError(err)}`);
     }
   }
+}
+
+function isIdentityRecord(value: unknown): value is IdentityRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.homeAccountId === 'string' &&
+    typeof record.username === 'string' &&
+    typeof record.clientId === 'string' &&
+    typeof record.authority === 'string' &&
+    typeof record.capturedAt === 'string' &&
+    (record.source === 'msal-account' || record.source === 'graph-me') &&
+    (record.name === undefined || typeof record.name === 'string') &&
+    (record.tenantId === undefined || typeof record.tenantId === 'string')
+  );
+}
+
+/**
+ * Reads the login-time identity snapshot. Never throws: a missing, corrupt,
+ * or undecryptable file (wrong key after rotation) reads as absent and the
+ * caller falls back to a live `/me` lookup.
+ */
+export async function readIdentity(cacheDir: string): Promise<IdentityRecord | null> {
+  return runExclusive(cacheDir, async () => {
+    const identityPath = join(cacheDir, IDENTITY_FILE);
+    let encoded: string;
+    try {
+      encoded = await readFile(identityPath, 'utf8');
+    } catch (err) {
+      if (errorCode(err) !== 'ENOENT') {
+        warn(`could not read the identity cache: ${describeError(err)}`);
+      }
+      return null;
+    }
+    if (encoded.trim().length === 0) return null;
+
+    let plaintext: string;
+    try {
+      const key = await loadOrCreateKey(cacheDir);
+      plaintext = decrypt(key, encoded);
+    } catch {
+      return null;
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(plaintext);
+      return isIdentityRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+/**
+ * One-line human-readable rendering of the snapshot for tool output. Names
+ * the session (username, display name, tenant) plus when and how the snapshot
+ * was captured; never the account id, client id, or authority, which a reader
+ * cannot act on. Pure: formatting must not fail a tool call.
+ */
+export function formatIdentityLine(record: IdentityRecord): string {
+  const who =
+    record.name !== undefined && record.name !== '' && record.name !== record.username
+      ? `${record.username} (${record.name})`
+      : record.username;
+  const tenant =
+    record.tenantId !== undefined && record.tenantId !== '' ? ` in tenant ${record.tenantId}` : '';
+  return `Signed in as ${who}${tenant}; identity cached at ${record.capturedAt} (${record.source}).`;
+}
+
+/**
+ * Stores the login-time identity snapshot as JSON encrypted with the same
+ * 32-byte key as the MSAL blob. A write that cannot persist warns and is
+ * dropped: it must not fail the sign-in that is in flight.
+ */
+export async function writeIdentity(cacheDir: string, record: IdentityRecord): Promise<void> {
+  await runExclusive(cacheDir, async () => {
+    try {
+      await ensureDir(cacheDir);
+      const key = await loadOrCreateKey(cacheDir);
+      await writeSecret(join(cacheDir, IDENTITY_FILE), encrypt(key, JSON.stringify(record)));
+    } catch (err) {
+      warn(`could not persist the identity cache: ${describeError(err)}`);
+    }
+  });
+}
+
+/** Deletes the identity snapshot. Safe to call when it does not exist. */
+export async function clearIdentity(cacheDir: string): Promise<void> {
+  await runExclusive(cacheDir, async () => {
+    await rm(join(cacheDir, IDENTITY_FILE), { force: true });
+  });
 }
 
 /**
@@ -219,15 +312,27 @@ export function createCachePlugin(cacheDir: string): ICachePlugin {
   };
 }
 
-/** Deletes the encrypted cache and its key. Safe to call when neither exists. */
+/**
+ * Deletes the encrypted cache, the identity snapshot, and the key. Safe to
+ * call when none exists.
+ */
 export async function clearCache(cacheDir: string): Promise<void> {
   await runExclusive(cacheDir, async () => {
     await rm(join(cacheDir, CACHE_FILE), { force: true });
+    await rm(join(cacheDir, IDENTITY_FILE), { force: true });
     await rm(join(cacheDir, KEY_FILE), { force: true });
   });
 }
 
 /** Absolute paths this module owns, for status output and diagnostics. */
-export function cachePaths(cacheDir: string): { cacheFile: string; keyFile: string } {
-  return { cacheFile: join(cacheDir, CACHE_FILE), keyFile: join(cacheDir, KEY_FILE) };
+export function cachePaths(cacheDir: string): {
+  cacheFile: string;
+  keyFile: string;
+  identityFile: string;
+} {
+  return {
+    cacheFile: join(cacheDir, CACHE_FILE),
+    keyFile: join(cacheDir, KEY_FILE),
+    identityFile: join(cacheDir, IDENTITY_FILE),
+  };
 }

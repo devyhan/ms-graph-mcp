@@ -26,6 +26,26 @@ export interface AccountInfo {
 }
 
 /**
+ * Login-time snapshot of the signed-in identity, cached beside the token
+ * cache so status output can name the session without a Graph call.
+ *
+ * Stored as JSON encrypted with the same 32-byte key as the MSAL blob, never
+ * inside that blob: it must survive token-cache wipes and die with key
+ * rotation. `capturedAt` is an ISO-8601 instant; `source` says whether the
+ * snapshot came from the MSAL account or a Graph `/me` call.
+ */
+export interface IdentityRecord {
+  homeAccountId: string;
+  username: string;
+  name?: string;
+  tenantId?: string;
+  clientId: string;
+  authority: string;
+  capturedAt: string;
+  source: 'msal-account' | 'graph-me';
+}
+
+/**
  * Acquires Microsoft Graph access tokens for delegated scopes.
  *
  * Implementations cache tokens and refresh silently. `getToken` must never
@@ -312,6 +332,15 @@ export interface ToolDefinition {
   inputSchema: z.ZodType;
   /** True when the tool mutates data. Suppressed under `--read-only`. */
   write?: boolean;
+  /**
+   * Opt-in identity attribution: when true, the registration layer prepends a
+   * one-line rendering of the login-time cached identity to this tool's
+   * serialized output. Defaults to off; an absent snapshot means no line,
+   * never an error. Tools whose excerpts travel without their query context
+   * opt in so a reader can tell which session produced them without a Graph
+   * call. Nothing else about the output shape changes.
+   */
+  includeIdentity?: boolean;
   /** Delegated scopes this specific tool needs. */
   scopes: string[];
   /** The group this tool belongs to, for discovery and filtering. */

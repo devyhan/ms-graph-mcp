@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import type {
@@ -22,6 +25,7 @@ import {
 } from './provider.js';
 import type { MsalPublicClient } from './provider.js';
 import type { PreflightChecks, PreflightResult } from './preflight.js';
+import { readIdentity, writeIdentity } from './token-cache.js';
 
 const SCOPES = ['User.Read'];
 
@@ -1454,4 +1458,138 @@ test('an unreachable Entra warns but never stops the sign-in', async () => {
 
   assert.equal(account.username, ACCOUNT.username);
   assert.match(stderr, /no answer from Microsoft Entra \(stubbed\); sign-in will likely fail/);
+});
+
+// ---------------------------------------------------------------------------
+// Login-time identity snapshot: capture on every successful login path,
+// invalidation when the session it names is gone.
+// ---------------------------------------------------------------------------
+
+/** A config like BASE_CONFIG but with a real temp cache dir the snapshot can land in. */
+async function configWithCache(authFlow: AuthFlow = 'device'): Promise<ServerConfig> {
+  return { ...BASE_CONFIG, authFlow, cacheDir: await mkdtemp(join(tmpdir(), 'provider-identity-')) };
+}
+
+test('login by device code persists the MSAL identity snapshot', async () => {
+  const config = await configWithCache('device');
+  const provider = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+
+  await withCapturedStderr(() => provider.login(SCOPES));
+
+  const snapshot = await readIdentity(config.cacheDir);
+  assert.ok(snapshot !== null, 'expected an identity snapshot after login');
+  assert.equal(snapshot.homeAccountId, ACCOUNT.homeAccountId);
+  assert.equal(snapshot.username, ACCOUNT.username);
+  assert.equal(snapshot.name, ACCOUNT.name);
+  assert.equal(snapshot.tenantId, ACCOUNT.tenantId);
+  assert.equal(snapshot.clientId, config.clientId);
+  assert.equal(snapshot.authority, config.authority);
+  assert.equal(snapshot.source, 'msal-account');
+  assert.ok(!Number.isNaN(Date.parse(snapshot.capturedAt)), 'capturedAt is an ISO-8601 instant');
+});
+
+test('login by browser persists the same snapshot (the auth_begin_login tool path)', async () => {
+  // The tool forces the browser flow via `auth.login(wanted, 'browser')`, so a
+  // flow-override login is exactly the path it exercises.
+  const config = await configWithCache('auto');
+  const provider = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+
+  await withCapturedStderr(() => provider.login(SCOPES, 'browser'));
+
+  const snapshot = await readIdentity(config.cacheDir);
+  assert.ok(snapshot !== null, 'expected an identity snapshot after a browser login');
+  assert.equal(snapshot.homeAccountId, ACCOUNT.homeAccountId);
+  assert.equal(snapshot.username, ACCOUNT.username);
+  assert.equal(snapshot.source, 'msal-account');
+});
+
+test('a completed tool-driven device login persists the snapshot', async () => {
+  const config = await configWithCache('device');
+  const client = deferredDeviceClient(CODE, { accounts: [ACCOUNT] });
+  const provider = createAuthProvider({ config, client });
+
+  await provider.beginDeviceLogin(SCOPES);
+  client.settle('ok');
+  // The completion continuation persists in the background; poll for it.
+  let snapshot: Awaited<ReturnType<typeof readIdentity>> = null;
+  for (let i = 0; i < 100 && snapshot === null; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    snapshot = await readIdentity(config.cacheDir);
+  }
+
+  assert.deepEqual(await provider.deviceLoginStatus(), {
+    state: 'signedIn',
+    account: ACCOUNT.username,
+  });
+  assert.ok(snapshot !== null, 'expected an identity snapshot after the device flow completed');
+  assert.equal(snapshot.homeAccountId, ACCOUNT.homeAccountId);
+  assert.equal(snapshot.source, 'msal-account');
+});
+
+test('a silent-auth failure drops the snapshot as stale', async () => {
+  const config = await configWithCache('device');
+  const seeder = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+  await withCapturedStderr(() => seeder.login(SCOPES));
+  assert.ok((await readIdentity(config.cacheDir)) !== null, 'setup: a snapshot exists');
+
+  const failing = createAuthProvider({
+    config,
+    client: fakeClient({ accounts: [ACCOUNT], silentError: new Error('AADSTS700082: expired') }),
+  });
+  await assert.rejects(() => failing.getToken(SCOPES), InteractionRequiredError);
+  assert.equal(await readIdentity(config.cacheDir), null);
+});
+
+test('getToken with no account drops the snapshot as stale', async () => {
+  const config = await configWithCache('device');
+  const seeder = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+  await withCapturedStderr(() => seeder.login(SCOPES));
+  assert.ok((await readIdentity(config.cacheDir)) !== null, 'setup: a snapshot exists');
+
+  const signedOut = createAuthProvider({ config, client: fakeClient({ accounts: [] }) });
+  await assert.rejects(() => signedOut.getToken(SCOPES), InteractionRequiredError);
+  assert.equal(await readIdentity(config.cacheDir), null);
+});
+
+test('getAccount drops a snapshot naming a different account', async () => {
+  const config = await configWithCache('device');
+  await writeIdentity(config.cacheDir, {
+    homeAccountId: 'someone-else.uid.tid',
+    username: 'someone-else@example.com',
+    clientId: config.clientId,
+    authority: config.authority,
+    capturedAt: new Date().toISOString(),
+    source: 'msal-account',
+  });
+
+  const provider = createAuthProvider({ config, client: fakeClient({ accounts: [ACCOUNT] }) });
+  const account = await provider.getAccount();
+
+  assert.equal(account?.username, ACCOUNT.username);
+  assert.equal(await readIdentity(config.cacheDir), null, 'the mismatched snapshot is gone');
+});
+
+test('getAccount keeps a snapshot naming the same account', async () => {
+  const config = await configWithCache('device');
+  const seeder = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+  await withCapturedStderr(() => seeder.login(SCOPES));
+
+  const provider = createAuthProvider({ config, client: fakeClient({ accounts: [ACCOUNT] }) });
+  const account = await provider.getAccount();
+
+  assert.equal(account?.username, ACCOUNT.username);
+  const snapshot = await readIdentity(config.cacheDir);
+  assert.ok(snapshot !== null, 'a matching snapshot survives getAccount');
+  assert.equal(snapshot.homeAccountId, ACCOUNT.homeAccountId);
+});
+
+test('logout removes the identity snapshot', async () => {
+  const config = await configWithCache('device');
+  const provider = createAuthProvider({ config, client: fakeClient(), preflight: preflightStub() });
+  await withCapturedStderr(() => provider.login(SCOPES));
+  assert.ok((await readIdentity(config.cacheDir)) !== null, 'setup: a snapshot exists');
+
+  await provider.logout();
+
+  assert.equal(await readIdentity(config.cacheDir), null);
 });

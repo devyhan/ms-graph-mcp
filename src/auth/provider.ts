@@ -25,6 +25,7 @@ import type {
   AuthProvider,
   DeviceLoginPrompt,
   DeviceLoginStatus,
+  IdentityRecord,
   ServerConfig,
   SessionHealth,
 } from '../contracts.js';
@@ -36,7 +37,7 @@ import {
 import { InteractionRequiredError } from '../contracts.js';
 import { defaultPreflight } from './preflight.js';
 import type { PreflightChecks } from './preflight.js';
-import { clearCache, createCachePlugin } from './token-cache.js';
+import { clearCache, clearIdentity, createCachePlugin, readIdentity, writeIdentity } from './token-cache.js';
 
 /**
  * msal-node does not re-export `DeviceCodeResponse` from its entry point, and
@@ -866,9 +867,42 @@ export function createAuthProvider(opts: {
     return cachedAccount;
   }
 
+  /**
+   * Snapshots the signed-in identity from zero-cost MSAL fields, so status
+   * output can name the session without a Graph call. Never throws: the write
+   * warns and drops internally rather than failing the sign-in in flight.
+   */
+  async function persistIdentity(account: MsalAccountInfo): Promise<void> {
+    const record: IdentityRecord = {
+      homeAccountId: account.homeAccountId,
+      username: account.username,
+      clientId: config.clientId,
+      authority: config.authority,
+      capturedAt: new Date().toISOString(),
+      source: 'msal-account',
+    };
+    if (account.name !== undefined) record.name = account.name;
+    if (account.tenantId !== undefined) record.tenantId = account.tenantId;
+    await writeIdentity(config.cacheDir, record);
+  }
+
+  /**
+   * Drops the identity snapshot as stale. Best-effort: a snapshot that
+   * survives is harmless, because readers compare its homeAccountId against
+   * the live account and fall back to `/me` on a mismatch.
+   */
+  async function dropIdentity(): Promise<void> {
+    try {
+      await clearIdentity(config.cacheDir);
+    } catch {
+      // See above: failing to delete must not fail the call being handled.
+    }
+  }
+
   async function accountFromResult(result: AuthenticationResult | null): Promise<AccountInfo> {
     if (result?.account) {
       cachedAccount = result.account;
+      await persistIdentity(result.account);
       return toAccountInfo(result.account);
     }
     // Some flows return a result without an account; the cache still has it.
@@ -876,6 +910,7 @@ export function createAuthProvider(opts: {
     if (!account) {
       throw new Error('Sign-in completed but no account was written to the token cache.');
     }
+    await persistIdentity(account);
     return toAccountInfo(account);
   }
 
@@ -1065,6 +1100,9 @@ export function createAuthProvider(opts: {
             // The account cache is keyed on a session that did not exist a
             // moment ago, so force the next read to go to MSAL.
             cachedAccount = null;
+            // Not awaited: this continuation only records status, and the
+            // write warns and drops internally rather than throwing.
+            if (result.account) void persistIdentity(result.account);
           }
         },
         (err: unknown) => {
@@ -1124,6 +1162,8 @@ export function createAuthProvider(opts: {
     async getToken(scopes: string[]): Promise<string> {
       const account = await resolveAccount();
       if (!account) {
+        // No account, so any snapshot names a session that no longer exists.
+        await dropIdentity();
         // Deliberately no interactive fallback: a data request must not
         // unexpectedly open a browser and stay pending while a person signs in.
         // The caller must explicitly use auth_begin_login or the CLI command.
@@ -1143,6 +1183,9 @@ export function createAuthProvider(opts: {
         // Expired or revoked refresh token, a new scope needing consent, or a
         // conditional-access challenge all land here and all need interaction.
         cachedAccount = null;
+        // The session cannot mint tokens, so the snapshot is stale with it;
+        // callers fall back to a live `/me` lookup once signed in again.
+        await dropIdentity();
         // Except the endpoint refusal: signing in again through the same
         // tenantless endpoint fails identically, so this names the tenant fix
         // and marks the error for the tool-result headline. Only this kind is
@@ -1270,7 +1313,18 @@ export function createAuthProvider(opts: {
 
     async getAccount(): Promise<AccountInfo | null> {
       const account = await resolveAccount(true);
-      return account ? toAccountInfo(account) : null;
+      if (!account) {
+        await dropIdentity();
+        return null;
+      }
+      // Another process may have signed in (or out and back in) since the
+      // snapshot was taken: a homeAccountId that no longer matches names a
+      // session that is gone, so the snapshot goes with it.
+      const snapshot = await readIdentity(config.cacheDir);
+      if (snapshot !== null && snapshot.homeAccountId !== account.homeAccountId) {
+        await dropIdentity();
+      }
+      return toAccountInfo(account);
     },
 
     async login(scopes: string[], flowOverride?: AuthFlow): Promise<AccountInfo> {

@@ -251,7 +251,7 @@ async function runLogout(parsed: ParsedConfig): Promise<number> {
   const paths = cachePaths(config.cacheDir);
   // Read before signing out: the report must name what was actually there, not
   // what a cache directory usually holds.
-  const candidates = [paths.cacheFile, paths.keyFile];
+  const candidates = [paths.cacheFile, paths.keyFile, paths.identityFile];
   const found = await Promise.all(candidates.map(exists));
   const removed = candidates.filter((_, i) => found[i] === true);
   try {

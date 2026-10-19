@@ -158,6 +158,19 @@ test('logout with a session reports what it removed', async () => {
   await assert.rejects(stat(join(cacheDir, 'cache.key')));
 });
 
+test('logout reports and removes the identity snapshot with the session', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'ms-graph-mcp-logout-'));
+  await writeFile(join(cacheDir, 'token-cache.enc'), 'not a real cache', 'utf8');
+  await writeFile(join(cacheDir, 'cache.key'), 'not a real key', 'utf8');
+  await writeFile(join(cacheDir, 'identity-cache.enc'), 'not a real snapshot', 'utf8');
+  const { code, stdout } = await runCli(['logout'], testEnv(cacheDir));
+  assert.equal(code, 0);
+  assert.match(stdout, /Signed out\. Removed .*identity-cache\.enc/);
+  await assert.rejects(stat(join(cacheDir, 'token-cache.enc')));
+  await assert.rejects(stat(join(cacheDir, 'cache.key')));
+  await assert.rejects(stat(join(cacheDir, 'identity-cache.enc')));
+});
+
 test('status names dropped groups and the --org-mode remedy on the Groups line', async () => {
   const cacheDir = await mkdtemp(join(tmpdir(), 'ms-graph-mcp-status-'));
   const { code, stdout } = await runCli(['status', '--groups', 'teams'], testEnv(cacheDir));

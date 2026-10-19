@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import type {
   AuthProvider,
   GraphClient,
+  IdentityRecord,
   OutputFormat,
   ServerConfig,
   ToolDefinition,
 } from './contracts.js';
 import { InteractionRequiredError } from './contracts.js';
+import { writeIdentity } from './auth/token-cache.js';
 import { z } from 'zod';
 import {
   AGENT_START_PROMPT,
@@ -336,4 +341,118 @@ test('registered tools serialise results in the configured output format', async
   assert.deepEqual(JSON.parse(json), value);
   assert.deepEqual(decodeToon(toon), value);
   assert.ok(toon.length < json.length, `expected toon (${toon.length}) to beat json (${json.length})`);
+});
+
+/** Invokes one tool through the registration wrapper with a real cache dir. */
+async function registeredText(tool: ToolDefinition, cacheDir: string): Promise<string> {
+  const unreachable = async (): Promise<never> => {
+    throw new Error('the probe tool never reaches Graph or auth');
+  };
+  const graph = { request: unreachable, batch: unreachable, follow: unreachable } as GraphClient;
+  const auth = {
+    getToken: unreachable,
+    getAccount: unreachable,
+    login: unreachable,
+    logout: unreachable,
+    beginDeviceLogin: unreachable,
+    deviceLoginStatus: unreachable,
+  } as AuthProvider;
+  const config: ServerConfig = {
+    clientId: '00000000-0000-0000-0000-000000000000',
+    tenantId: 'common',
+    authority: 'https://login.microsoftonline.com/common',
+    graphHost: 'graph.microsoft.com',
+    groups: ['me'],
+    readOnly: false,
+    graphVersion: 'v1.0',
+    allowBeta: false,
+    discovery: false,
+    orgMode: false,
+    maxOutputChars: 60_000,
+    output: 'json',
+    verbose: false,
+    cacheDir,
+    authFlow: 'auto',
+    authPort: 0,
+    allowGenericWrite: false,
+  };
+  const server = createServerFactory({ config, graph, auth, tools: [tool] })();
+  // Same narrow cast as the format test above: the raw callback is the only
+  // way to observe what a tool call returns without a client.
+  const registered = (
+    server as unknown as {
+      _registeredTools: Record<
+        string,
+        { handler: (args: unknown) => Promise<{ content: [{ text: string }] }> }
+      >;
+    }
+  )._registeredTools;
+  const entry = registered[tool.name];
+  assert.ok(entry !== undefined, `expected ${tool.name} among the registered tools`);
+  const result = await entry.handler({});
+  const first = result.content[0];
+  assert.ok(first !== undefined);
+  return first.text;
+}
+
+const SNAPSHOT: IdentityRecord = {
+  homeAccountId: 'home-account-id',
+  username: 'someone@example.test',
+  name: 'Someone',
+  tenantId: 'tenant-id',
+  clientId: 'client-id',
+  authority: 'https://login.microsoftonline.com/common',
+  capturedAt: '2026-10-19T00:00:00.000Z',
+  source: 'msal-account',
+};
+
+function probeTool(over: Partial<ToolDefinition> = {}): { tool: ToolDefinition; value: unknown } {
+  const value = { hello: 'world' };
+  return {
+    value,
+    tool: {
+      name: 'probe_tool',
+      title: 'Probe',
+      description: 'Returns a fixed value.',
+      inputSchema: z.object({}),
+      scopes: [],
+      group: 'me',
+      handler: () => Promise.resolve(value),
+      ...over,
+    },
+  };
+}
+
+test('an opted-in tool prepends the cached-identity line above its payload', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'server-identity-'));
+  await writeIdentity(cacheDir, SNAPSHOT);
+  const { tool, value } = probeTool({ includeIdentity: true });
+
+  const text = await registeredText(tool, cacheDir);
+  const [line, ...rest] = text.split('\n');
+  assert.equal(
+    line,
+    'Signed in as someone@example.test (Someone) in tenant tenant-id; ' +
+      'identity cached at 2026-10-19T00:00:00.000Z (msal-account).',
+  );
+  assert.deepEqual(JSON.parse(rest.join('\n')), value);
+});
+
+test('a tool that does not opt in keeps byte-identical output with a snapshot present', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'server-identity-'));
+  await writeIdentity(cacheDir, SNAPSHOT);
+  const { tool, value } = probeTool();
+
+  const text = await registeredText(tool, cacheDir);
+  assert.doesNotMatch(text, /Signed in as/);
+  assert.deepEqual(JSON.parse(text), value);
+});
+
+test('an opted-in tool without a snapshot returns its payload unchanged', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'server-identity-'));
+  const { tool, value } = probeTool({ includeIdentity: true });
+
+  const text = await registeredText(tool, cacheDir);
+  assert.doesNotMatch(text, /Signed in as/);
+  assert.deepEqual(JSON.parse(text), value);
 });

@@ -18,6 +18,7 @@ import type {
 } from './contracts.js';
 import { GraphError, InteractionRequiredError } from './contracts.js';
 import { isNetworkFailure, networkFailureMessage } from './auth/provider.js';
+import { formatIdentityLine, readIdentity } from './auth/token-cache.js';
 import { packageVersion } from './config.js';
 import { GROUP_NAMES } from './tools/groups.js';
 import { buildDiscoveryTools } from './tools/discovery.js';
@@ -383,7 +384,8 @@ export function createServerFactory(deps: FactoryDeps): () => McpServer {
           try {
             const value = await def.handler((args ?? {}) as Record<string, unknown>);
             const { text } = serializeResult(value, config.maxOutputChars, config.output);
-            return { content: [{ type: 'text' as const, text }] };
+            const attributed = await maybePrependIdentity(def, config.cacheDir, text);
+            return { content: [{ type: 'text' as const, text: attributed }] };
           } catch (error) {
             return {
               content: [{ type: 'text' as const, text: toolErrorText(def.name, error) }],
@@ -402,6 +404,31 @@ export function createServerFactory(deps: FactoryDeps): () => McpServer {
 
     return server;
   };
+}
+
+/**
+ * The identity attribution hook: tools that opt in via `includeIdentity` get
+ * the login-time snapshot rendered as one line above their serialized output,
+ * so an excerpt travelling without its query context still names the session
+ * that produced it. Opt-in only — every other tool's bytes are untouched —
+ * offline (a disk read, never a Graph call), and silent when no snapshot
+ * exists. Runs after serialization so the output budget still applies to the
+ * payload itself.
+ */
+async function maybePrependIdentity(
+  def: ToolDefinition,
+  cacheDir: string,
+  text: string,
+): Promise<string> {
+  if (def.includeIdentity !== true) return text;
+  let snapshot: Awaited<ReturnType<typeof readIdentity>>;
+  try {
+    snapshot = await readIdentity(cacheDir);
+  } catch {
+    return text;
+  }
+  if (snapshot === null) return text;
+  return `${formatIdentityLine(snapshot)}\n${text}`;
 }
 
 /**

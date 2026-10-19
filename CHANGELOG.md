@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-19
+
+### Added
+
+- Login-time identity snapshot: every successful sign-in caches who signed
+  in (username, display name, tenant) encrypted beside the token cache, so
+  status output can name the session without a Graph call. `session_status`
+  returns it as `cachedIdentity`, and tools can opt in to a one-line header
+  above their output. The snapshot is dropped with `logout`, when the
+  session can no longer mint tokens, or when another process signs in over
+  it; a missing or corrupt file reads as absent, never as an error.
+
 ## [0.6.1] - 2026-10-19
 
 ### Added

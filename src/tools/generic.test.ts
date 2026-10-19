@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import type {
@@ -8,10 +11,12 @@ import type {
   GraphClient,
   GraphRequestOptions,
   GraphResponse,
+  IdentityRecord,
   ServerConfig,
   SessionHealth,
   ToolDefinition,
 } from '../contracts.js';
+import { writeIdentity } from '../auth/token-cache.js';
 import { collectTools, exposedToolNames } from '../server.js';
 import { MINIMAL_LOGIN_SCOPES, consentScopesFor, loginScopesFor } from './groups.js';
 import { scopeReadingOnlyAuth } from '../auth/index.js';
@@ -518,6 +523,96 @@ test('session_status survives a probe that throws', async () => {
 
   assert.equal(result['tokenUsable'], false);
   assert.match(String(result['sessionNote']), /Could not probe the session/);
+});
+
+/** Answers GET /me with a canned profile while counting every request. */
+function countingMeGraph(
+  me: Record<string, unknown>,
+): GraphClient & { readonly requests: GraphRequestOptions[] } {
+  const requests: GraphRequestOptions[] = [];
+  const refuse = async (): Promise<never> => {
+    throw new Error('only /me is stubbed');
+  };
+  return {
+    requests,
+    request: (async (opts: GraphRequestOptions) => {
+      requests.push(opts);
+      return { status: 200, data: me };
+    }) as unknown as GraphClient['request'],
+    batch: refuse as unknown as () => Promise<GraphBatchResponse[]>,
+    follow: refuse as unknown as GraphClient['follow'],
+  };
+}
+
+function identityRecord(over: Partial<IdentityRecord> = {}): IdentityRecord {
+  return {
+    homeAccountId: ACCOUNT.homeAccountId,
+    username: ACCOUNT.username,
+    name: ACCOUNT.name,
+    tenantId: ACCOUNT.tenantId,
+    clientId: 'client-id',
+    authority: 'https://login.microsoftonline.com/common',
+    capturedAt: '2026-10-19T00:00:00.000Z',
+    source: 'msal-account',
+    ...over,
+  };
+}
+
+test('session_status includes the cached identity without a Graph call for it', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'generic-identity-'));
+  await writeIdentity(cacheDir, identityRecord());
+  const graph = countingMeGraph({ id: 'user-id' });
+  const tools = toolsFor(
+    { cacheDir },
+    stubAuth(new Promise(() => {}), ACCOUNT),
+    graph,
+  );
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  // Projected to what a reader can act on: no account id, client id, or authority.
+  assert.deepEqual(result['cachedIdentity'], {
+    username: ACCOUNT.username,
+    name: ACCOUNT.name,
+    tenantId: ACCOUNT.tenantId,
+    capturedAt: '2026-10-19T00:00:00.000Z',
+    source: 'msal-account',
+  });
+  // The only Graph call is the live /me leg: the identity leg read the disk.
+  assert.equal(graph.requests.length, 1);
+  assert.equal(graph.requests[0]?.path, '/me');
+});
+
+test('session_status reports a null cached identity when no snapshot exists', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'generic-identity-'));
+  const graph = countingMeGraph({ id: 'user-id' });
+  const tools = toolsFor(
+    { cacheDir },
+    stubAuth(new Promise(() => {}), ACCOUNT),
+    graph,
+  );
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  assert.equal(result['cachedIdentity'], null);
+  assert.equal(graph.requests.length, 1);
+});
+
+test('session_status drops a snapshot naming a different account', async () => {
+  // Another process signed in since the snapshot was taken: reporting it
+  // would name a session that is gone.
+  const cacheDir = await mkdtemp(join(tmpdir(), 'generic-identity-'));
+  await writeIdentity(
+    cacheDir,
+    identityRecord({ homeAccountId: 'someone-else.uid.tid', username: 'someone-else@example.test' }),
+  );
+  const tools = toolsFor(
+    { cacheDir },
+    stubAuth(new Promise(() => {}), ACCOUNT),
+    meGraph({ id: 'user-id' }),
+  );
+  const result = (await byName(tools, 'session_status').handler({})) as Record<string, unknown>;
+
+  assert.equal(result['cachedIdentity'], null);
+  assert.equal((result['cachedAccount'] as Record<string, unknown>)['username'], ACCOUNT.username);
 });
 
 test('login status falls back to the cached account when no browser sign-in was started', async () => {
