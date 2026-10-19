@@ -122,7 +122,14 @@ test('concurrent identity writes serialize without interleaving', async () => {
   assert.deepEqual(read, read.username === first.username ? first : second);
 });
 
-test('the identity file is created with owner-only permissions', async () => {
+test('the identity file is created with owner-only permissions', async (t) => {
+  // Windows has no POSIX permission bits: Node synthesizes 0666 and the 0600
+  // passed to writeFile is correctly a no-op there, so there is nothing to
+  // assert. The product behavior is unchanged on every platform.
+  if (process.platform === 'win32') {
+    t.skip('POSIX file modes do not exist on Windows');
+    return;
+  }
   const dir = await tempDir();
   await writeIdentity(dir, sampleRecord());
   const mode = (await stat(cachePaths(dir).identityFile)).mode & 0o777;
