@@ -276,6 +276,13 @@ int main(int argc, char** argv) {
         std::cerr << "[mip] passthrough copy failed: " << ec.message() << "\n";
         return 1;
       }
+      // Owner-only AFTER the bytes land: the copy above creates the file
+      // first, so a umask instant precedes this; it bounds resting exposure,
+      // it does not close the creation window.
+      std::filesystem::permissions(
+          output,
+          std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+          std::filesystem::perm_options::replace, ec);
       std::cerr << "[mip] not protected; copied through\n";
       return 0;
     }
@@ -295,6 +302,16 @@ int main(int argc, char** argv) {
     auto commitPromise = std::make_shared<std::promise<bool>>();
     handler->CommitAsync(output, commitPromise);
     bool ok = commitPromise->get_future().get();
+    if (ok) {
+      // Same honest ordering as the passthrough path: the SDK creates the
+      // output inside CommitAsync (umask instant), so this only tightens
+      // the resting file to owner-only afterwards.
+      std::error_code ec;
+      std::filesystem::permissions(
+          output,
+          std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+          std::filesystem::perm_options::replace, ec);
+    }
     std::cerr << (ok ? "[mip] WROTE " : "[mip] COMMIT FAILED ") << output << "\n";
     return ok ? 0 : 1;
   } catch (const std::exception& ex) {

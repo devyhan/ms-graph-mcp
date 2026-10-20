@@ -58,6 +58,11 @@ export MS365_MCP_MIP_DECRYPTOR=/path/to/ms-graph-mcp/native/mip-decrypt/build/mi
 | `MIP_DECRYPT_AUTHORITY` | no | `https://login.microsoftonline.com/common` | Entra authority. |
 | `MIP_DECRYPT_STORAGE` | no | per-user temp subdir | Writable MIP storage dir. |
 
+MIP storage (`MIP_DECRYPT_STORAGE`, default `$TMPDIR/mip-decrypt`) persists
+engine state, cached templates, and policy between runs — no document
+plaintext, but identity-adjacent state worth clearing on teardown or
+identity rotation: `rm -rf "${MIP_DECRYPT_STORAGE:-$TMPDIR/mip-decrypt}"`.
+
 ## Auth-helper token contract
 
 The sidecar never does interactive auth itself: on each RMS challenge it runs

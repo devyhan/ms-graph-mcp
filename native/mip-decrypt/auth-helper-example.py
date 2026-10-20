@@ -40,6 +40,8 @@ def main(argv: list[str]) -> int:
 
     cache = msal.SerializableTokenCache()
     if os.path.exists(CACHE_PATH):
+        # Pre-existing cache may predate the 0600 write below; tighten it.
+        os.chmod(CACHE_PATH, 0o600)
         with open(CACHE_PATH, encoding="utf-8") as handle:
             cache.deserialize(handle.read())
 
@@ -68,7 +70,11 @@ def main(argv: list[str]) -> int:
             result = app.acquire_token_by_device_flow(flow)
 
     if cache.has_state_changed:
-        with open(CACHE_PATH, "w", encoding="utf-8") as handle:
+        # 0600 from creation: os.open applies the mode atomically so no
+        # umask instant leaves the refresh token world-readable. The mode
+        # is ignored for a pre-existing file, hence the chmod after.
+        fd = os.open(CACHE_PATH, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(cache.serialize())
         os.chmod(CACHE_PATH, 0o600)
 

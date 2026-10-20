@@ -167,8 +167,9 @@ function removeQuietly(file: string): Promise<void> {
 /**
  * Runs `<sidecar> <inPath> <outPath>` over one document. Wrapper bytes travel
  * through a 0600 temp file inside a fresh mkdtemp directory; both paths and
- * the directory are removed in a finally, including on timeout kill, so
- * protected bytes are never left behind in /tmp.
+ * the directory are removed in a finally, including after a timeout kill of
+ * the sidecar. A SIGKILL of this process itself skips the finally, so stale
+ * bytes in /tmp are possible — cleanup is best-effort, not guaranteed.
  */
 export async function decryptWithSidecar(
   sidecar: string,
