@@ -71,6 +71,12 @@ Once an administrator has granted the scope, sign in again for just it (with the
 npx @devyhan/ms-graph-mcp login --scopes ChannelMessage.Read.All --groups search,chat,teams,me --org-mode
 ```
 
+### Rights Management consent
+
+Reading a Purview-protected (AIP/RMS) document needs no extra Graph scope: `files_parse_document` downloads with the scopes it already has, and the unprotect step happens outside Graph entirely, inside the `mip-decrypt` sidecar. That is why no RMS scope appears in any group, in `permissions`, or in the consent prompt — `https://aadrm.com/user_impersonation` is not a Graph permission and this server never asks for it.
+
+The sidecar authenticates on its own: on each RMS challenge it runs the helper named by `MIP_DECRYPT_AUTH_HELPER`, which mints the token in whatever flow it implements (the example defaults to MSAL device code, `MIP_AUTH_FLOW=browser` where Conditional Access blocks the device grant). Any consent that resource needs happens inside that helper's flow, not in this server's sign-in. What the helper's identity does need is usage rights on the document itself; without them the decrypt fails with a `NO_RIGHTS` diagnosis rather than corrupt output. See `native/mip-decrypt/README.md` for the sidecar's own configuration.
+
 ## Register your own Entra application
 
 Once the shared registration ships, most users can skip this section. It remains the supported fallback for the reasons listed in [Which application am I signing in to](#which-application-am-i-signing-in-to), and until then it is the only way to sign in.

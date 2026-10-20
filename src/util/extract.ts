@@ -17,6 +17,14 @@
 
 export type DocumentKind = 'docx' | 'xlsx' | 'pptx' | 'pdf';
 
+/**
+ * How a document is protected, when protection was detected. `password` is the
+ * reserved bucket for a classifier this lane does not add (the PDF/Office
+ * extractors already map those failures to the generic refusal); only
+ * `aip-rms` and `unknown` are produced here.
+ */
+export type ProtectionKind = 'aip-rms' | 'password' | 'unknown';
+
 /** One page, slide, sheet or section of extracted text. */
 export interface ExtractedUnit {
   /** Stable within the document: slide id, page number, sheet name. */
@@ -105,6 +113,54 @@ export function detectKind(name: string, mimeType: string | undefined, bytes: Ui
 }
 
 /**
+ * Byte markers of a Microsoft Purview (AIP/RMS) protected-PDF wrapper. The
+ * wrapper is still a readable PDF — its pages are a cover notice, not the
+ * content — so extraction succeeding is exactly the failure to guard against.
+ */
+const AIP_WRAPPER_MARKERS = ['irm', 'rms', 'rights', 'aadrm'];
+
+/**
+ * True when the bytes look like a Purview-protected PDF wrapper: a real PDF
+ * carrying an encryption dictionary plus a rights-management marker. A plain
+ * password PDF has `/Encrypt` but none of the markers, so it stays on the
+ * existing password path instead of being misreported as AIP.
+ */
+export function isAipWrapperPdf(bytes: Uint8Array): boolean {
+  if (!hasMagic(bytes, PDF_MAGIC)) return false;
+  // latin1 maps bytes 1:1, so binary content cannot break or dodge the scan.
+  const text = Buffer.from(bytes).toString('latin1').toLowerCase();
+  if (!text.includes('/encrypt')) return false;
+  return AIP_WRAPPER_MARKERS.some((marker) => text.includes(marker));
+}
+
+/**
+ * Cover-page phrases of a Purview-protected PDF, in already-normalized form
+ * (lowercase, single spaces). Transcribed from a real pPDF wrapper cover as
+ * this pipeline extracts it — template boilerplate only, no document content —
+ * and verified against that extraction. They stay long and specific so
+ * ordinary documents cannot trip them; the Korean phrases dodge the row
+ * joiner's spacing quirks by ending before the reflowed punctuation.
+ */
+export const AIP_COVER_PHRASES: readonly string[] = [
+  'microsoft azure information protection',
+  'microsoft corporation, one microsoft way, redmond, wa 98052',
+  '이 문서는 보호된 문서입니다',
+  '지원되는 pdf 리더 앱을 사용하여 볼 수 있습니다',
+  '보호된 pdf 문서에 대해 알아보세요',
+  '개인정보처리방침',
+];
+
+/**
+ * True when extracted page text reads as a protection cover rather than
+ * content. Matching runs on whitespace-normalized text because PDF row
+ * grouping reflows the cover's line breaks.
+ */
+export function isAipCoverText(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ');
+  return AIP_COVER_PHRASES.some((phrase) => normalized.includes(phrase));
+}
+
+/**
  * True when a library failure smells like protection rather than corruption:
  * password, Azure RMS/IRM, or a rights-managed wrapper. Callers map this to
  * the friendly refusal instead of surfacing the library's stack.
@@ -165,8 +221,37 @@ function mdCell(text: string): string {
   return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-export function protectionRefusal(name: string): Error {
-  return new Error(
+/**
+ * Refusal for a document that cannot be parsed because it is protected. The
+ * `code`/`protection` fields let callers branch (offer a decryptor for
+ * `aip-rms`, a different hint for the rest) without parsing the message.
+ */
+export class ProtectedDocumentError extends Error {
+  readonly code = 'PROTECTED_DOCUMENT';
+  readonly protection: ProtectionKind;
+  readonly fileName: string;
+
+  constructor(fileName: string, protection: ProtectionKind, message: string) {
+    super(message);
+    this.name = 'ProtectedDocumentError';
+    this.protection = protection;
+    this.fileName = fileName;
+  }
+}
+
+export function protectionRefusal(name: string, protection: ProtectionKind = 'unknown'): ProtectedDocumentError {
+  if (protection === 'aip-rms') {
+    return new ProtectedDocumentError(
+      name,
+      protection,
+      `"${name}" is protected with Microsoft Purview Information Protection (AIP/RMS), so only its cover page ` +
+        'is readable here. Decrypt it first — configure the MIP decryptor (--mip-decryptor) and call again — ' +
+        'or open it in its native app and save an unprotected copy.',
+    );
+  }
+  return new ProtectedDocumentError(
+    name,
+    protection,
     `"${name}" is password-protected or rights-managed (IRM/RMS), so its text cannot be extracted here. ` +
       'Remove the protection in the native app and try again.',
   );

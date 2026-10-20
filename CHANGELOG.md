@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-20
+
+### Added
+
+- Purview-protected (AIP/RMS) document support in `files_parse_document`:
+  wrappers are detected by their markers (cover text is a second net) and
+  refused with `PROTECTED_DOCUMENT` instead of returning the cover page as
+  content. With a `mip-decrypt` sidecar configured (`--mip-decryptor` /
+  `MS365_MCP_MIP_DECRYPTOR`, else a bundled copy or `PATH` lookup), the
+  document is decrypted through a temp file and parsed, and the result and
+  manifest carry `protected`, `protection: 'aip-rms'` and `decrypted`.
+  `status`, `permissions` and `graph_list_permissions` report the sidecar
+  as `mip-decryptor resolved` or `absent`. No new Graph scope and no new
+  dependency: the sidecar (see `native/mip-decrypt`) authenticates to RMS
+  on its own. See [Rights Management consent](docs/auth.md#rights-management-consent).
+
 ## [0.7.0] - 2026-10-19
 
 ### Added

@@ -211,6 +211,32 @@ test('the output flag beats the environment, and help documents both', () => {
   assert.match(text, /MS365_MCP_OUTPUT/);
 });
 
+test('the mip-decryptor flag beats the environment, and help documents both', () => {
+  assert.equal(parseConfig([], NO_ENV).config.mipDecryptor, undefined);
+  assert.equal(
+    parseConfig(['--mip-decryptor', '/opt/mip-decrypt'], NO_ENV).config.mipDecryptor,
+    '/opt/mip-decrypt',
+  );
+  assert.equal(
+    parseConfig(['--mip-decryptor=/opt/mip-decrypt'], NO_ENV).config.mipDecryptor,
+    '/opt/mip-decrypt',
+  );
+  assert.equal(
+    parseConfig([], { MS365_MCP_MIP_DECRYPTOR: '/env/mip-decrypt' }).config.mipDecryptor,
+    '/env/mip-decrypt',
+  );
+  const { config } = parseConfig(['--mip-decryptor', '/flag/mip-decrypt'], {
+    MS365_MCP_MIP_DECRYPTOR: '/env/mip-decrypt',
+  });
+  assert.equal(config.mipDecryptor, '/flag/mip-decrypt');
+
+  const help = parseConfig(['--help'], NO_ENV).command;
+  assert.equal(help.kind, 'help');
+  const text = help.kind === 'help' ? help.text : '';
+  assert.match(text, /--mip-decryptor/);
+  assert.match(text, /MS365_MCP_MIP_DECRYPTOR/);
+});
+
 test('auth flags on the command line beat the environment', () => {
   const env: NodeJS.ProcessEnv = { MS365_MCP_AUTH_FLOW: 'device', MS365_MCP_AUTH_PORT: '8400' };
   const { config } = parseConfig(['--auth-flow', 'browser', '--auth-port', '9001'], env);

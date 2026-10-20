@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { GraphClient, GraphRequestOptions, GraphResponse } from '../contracts.js';
-import { MAX_DOCUMENT_BYTES } from './extract.js';
+import { AIP_COVER_PHRASES, MAX_DOCUMENT_BYTES, ProtectedDocumentError } from './extract.js';
 import {
   decodeParseCursor,
   parseDocument,
@@ -10,6 +10,13 @@ import {
 } from './parse-document.js';
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31]);
+
+/** Minimal fake Purview wrapper: magic + /Encrypt + an IRM marker. Never real bytes. */
+const WRAPPER_PDF_BYTES = new Uint8Array(
+  Buffer.from('%PDF-1.7\n1 0 obj\n<< /Filter /Aadrm >>\ntrailer << /Encrypt 1 0 R >>', 'latin1'),
+);
+
+const COVER_TEXT = `Protective cover\n${AIP_COVER_PHRASES[0] ?? 'missing phrase'}\nEnd of cover`;
 
 function stubGraph(routes: Record<string, unknown>): GraphClient & { paths: string[] } {
   const paths: string[] = [];
@@ -218,4 +225,111 @@ test('untitled units appear in the outline without a title key', async () => {
     extract: async () => ({ units: [{ id: 'p1', text: 'no heading here' }], warnings: [] }),
   });
   assert.deepEqual(result.manifest.titles, [{ i: 0, id: 'p1' }]);
+});
+
+test('an ordinary document reports unprotected in the result and the manifest', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  const result = await parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, deps(graph));
+  assert.equal(result.protected, false);
+  assert.equal(result.protection, undefined);
+  assert.equal(result.decrypted, false);
+  assert.equal(result.manifest.protected, false);
+  assert.equal(result.manifest.protection, undefined);
+  assert.equal(result.manifest.decrypted, false);
+});
+
+test('a wrapper without a decryptor is refused with structure, never returned as cover units', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  const error = await parseDocument(
+    { source: { driveId: 'DRIVE', itemId: 'ITEM' } },
+    deps(graph, WRAPPER_PDF_BYTES),
+  ).then(
+    () => null,
+    (thrown: unknown) => thrown,
+  );
+  assert.ok(error instanceof ProtectedDocumentError);
+  assert.equal(error.code, 'PROTECTED_DOCUMENT');
+  assert.equal(error.protection, 'aip-rms');
+  assert.equal(error.fileName, 'report.pdf');
+  assert.match(error.message, /decrypt/i);
+});
+
+test('a wrapper with a decryptor parses the plaintext and reports it', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  const seen: Array<{ bytes: Uint8Array; fileName: string }> = [];
+  const result = await parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+    ...deps(graph, WRAPPER_PDF_BYTES),
+    decrypt: async (bytes, fileName) => {
+      seen.push({ bytes, fileName });
+      return PDF_BYTES;
+    },
+    extract: async () => ({ units: [{ id: 'page-1', title: 'Page 1', text: 'decrypted content' }], warnings: [] }),
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.fileName, 'report.pdf');
+  assert.deepEqual(seen[0]?.bytes, WRAPPER_PDF_BYTES);
+  assert.equal(result.units[0]?.text, 'decrypted content');
+  assert.equal(result.protected, true);
+  assert.equal(result.protection, 'aip-rms');
+  assert.equal(result.decrypted, true);
+  assert.equal(result.manifest.protected, true);
+  assert.equal(result.manifest.protection, 'aip-rms');
+  assert.equal(result.manifest.decrypted, true);
+});
+
+test('a cover page without byte markers is refused without a decryptor', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  await assert.rejects(
+    () =>
+      parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+        ...deps(graph),
+        extract: async () => ({ units: [{ id: 'page-1', text: COVER_TEXT }], warnings: [] }),
+      }),
+    /Purview|AIP\/RMS/,
+  );
+});
+
+test('a cover page with a decryptor re-extracts the plaintext', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  let calls = 0;
+  const result = await parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+    ...deps(graph),
+    decrypt: async () => PDF_BYTES,
+    extract: async () => {
+      calls += 1;
+      return calls === 1
+        ? { units: [{ id: 'page-1', text: COVER_TEXT }], warnings: [] }
+        : { units: [{ id: 'page-1', text: 'real content after decrypt' }], warnings: [] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.units[0]?.text, 'real content after decrypt');
+  assert.equal(result.protected, true);
+  assert.equal(result.protection, 'aip-rms');
+  assert.equal(result.decrypted, true);
+});
+
+test('decrypted bytes that still read as a cover are refused', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  await assert.rejects(
+    () =>
+      parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+        ...deps(graph, WRAPPER_PDF_BYTES),
+        decrypt: async () => PDF_BYTES,
+        extract: async () => ({ units: [{ id: 'page-1', text: COVER_TEXT }], warnings: [] }),
+      }),
+    /Purview|AIP\/RMS/,
+  );
+});
+
+test('a decrypt output that is still a wrapper is refused', async () => {
+  const graph = stubGraph({ '/drives/DRIVE/items/ITEM': DRIVE_META });
+  await assert.rejects(
+    () =>
+      parseDocument({ source: { driveId: 'DRIVE', itemId: 'ITEM' } }, {
+        ...deps(graph, WRAPPER_PDF_BYTES),
+        decrypt: async () => WRAPPER_PDF_BYTES,
+      }),
+    /Purview|AIP\/RMS/,
+  );
 });

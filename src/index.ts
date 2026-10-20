@@ -34,6 +34,7 @@ import { createGraphClient } from './graph/client.js';
 import { collectTools, createServerFactory, exposedTools } from './server.js';
 import { ADMIN_CONSENT_SCOPES, GROUPS, consentScopesFor, loginScopesFor, scopesForGroups } from './tools/groups.js';
 import { createLogger, logger, setLogger } from './util/logger.js';
+import { resolveMipDecryptorPath } from './util/mip-decrypt.js';
 import { checkForUpdate } from './util/update-check.js';
 
 /** Scopes every session asks for regardless of which groups are enabled. */
@@ -171,6 +172,18 @@ function pad(label: string): string {
  * left `status --groups teams` printing an empty `Groups: (+ generic)`, which
  * reads as a bug rather than a consent decision.
  */
+/**
+ * `resolved` when a MIP decryptor sidecar can be found for this config, else
+ * `absent`. The path itself stays out of the report: it is a local install
+ * detail, and the question the reader asks is whether protected documents
+ * will decrypt, not where the binary lives.
+ */
+function mipDecryptorState(config: ServerConfig): 'resolved' | 'absent' {
+  return resolveMipDecryptorPath({ explicitPath: config.mipDecryptor }) === undefined
+    ? 'absent'
+    : 'resolved';
+}
+
 function groupsLine(config: ServerConfig): string {
   const base = `${config.groups.join(', ')} (+ generic)`;
   const dropped = config.droppedGroups ?? [];
@@ -303,6 +316,7 @@ async function runStatus(parsed: ParsedConfig): Promise<number> {
       `, org-mode ${config.orgMode ? 'on' : 'off'}` +
       `, beta ${config.allowBeta ? 'allowed' : 'blocked'}` +
       `, generic writes ${config.allowGenericWrite ? 'allowed' : 'blocked'}` +
+      `, mip-decryptor ${mipDecryptorState(config)}` +
       `, output ${config.output}\n`,
   );
   out(`${pad('Sign-in:')}${describeAuthFlow(config)}\n`);
@@ -392,7 +406,10 @@ function runPermissions(config: ServerConfig): number {
   })();
 
   out('Delegated Microsoft Graph permissions for this configuration.\n');
-  out(`Mode: ${config.readOnly ? 'read-only (write scopes omitted)' : 'read-write'}\n\n`);
+  out(
+    `Mode: ${config.readOnly ? 'read-only (write scopes omitted)' : 'read-write'}` +
+      `, mip-decryptor ${mipDecryptorState(config)}\n\n`,
+  );
 
   out('Always requested\n');
   for (const scope of BASE_SCOPES) out(`  ${scope}\n`);

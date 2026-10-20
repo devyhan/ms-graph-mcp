@@ -690,3 +690,22 @@ test('an explicit scopes list overrides the path guess', async () => {
   assert.equal(graph.requests.length, 1);
   assert.deepEqual(graph.requests[0]?.scopes, ['Chat.ReadWrite']);
 });
+
+// ---------------------------------------------------------------------------
+// graph_list_permissions sidecar presence
+// ---------------------------------------------------------------------------
+
+test('graph_list_permissions reports the MIP decryptor sidecar state', async () => {
+  const run = (tools: ToolDefinition[]) =>
+    byName(tools, 'graph_list_permissions').handler({}) as Promise<Record<string, unknown>>;
+
+  // Unconfigured: a bundled copy or a PATH hit still resolves, so either word
+  // is honest and the assertion is the vocabulary, not the value.
+  const unconfigured = await run(toolsFor());
+  assert.ok(
+    unconfigured['mipDecryptor'] === 'resolved' || unconfigured['mipDecryptor'] === 'absent',
+  );
+
+  const configured = await run(toolsFor({ mipDecryptor: '/opt/mip-decrypt' }));
+  assert.equal(configured['mipDecryptor'], 'resolved');
+});

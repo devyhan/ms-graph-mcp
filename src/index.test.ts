@@ -32,6 +32,7 @@ function testEnv(cacheDir: string): NodeJS.ProcessEnv {
   delete env['MS365_MCP_READ_ONLY'];
   delete env['MS365_MCP_DISCOVERY'];
   delete env['MS365_MCP_ORG_MODE'];
+  delete env['MS365_MCP_MIP_DECRYPTOR'];
   return env;
 }
 
@@ -231,4 +232,24 @@ test('permissions annotates cross-group scopes with a short reason', async () =>
 test('permissions annotates the teams roster scope under --org-mode', async () => {
   const stdout = await permissionsOutput(['--groups', 'teams', '--org-mode']);
   assert.match(stdout, /TeamMember\.Read\.All.* — team roster only/);
+});
+
+test('status reports the MIP decryptor sidecar state on the Mode line', async () => {
+  const cacheDir = await mkdtemp(join(tmpdir(), 'ms-graph-mcp-status-'));
+  const env = testEnv(cacheDir);
+  // Unconfigured: either word is honest — a bundled copy or a PATH hit still
+  // resolves — so the assertion is the vocabulary, not the value.
+  assert.match(await statusOutput([], env), /^Mode:.*mip-decryptor (resolved|absent)/m);
+  assert.match(
+    await statusOutput(['--mip-decryptor', '/opt/mip-decrypt'], env),
+    /^Mode:.*mip-decryptor resolved/m,
+  );
+});
+
+test('permissions reports the MIP decryptor sidecar state on the Mode line', async () => {
+  assert.match(await permissionsOutput([]), /^Mode:.*mip-decryptor (resolved|absent)/m);
+  assert.match(
+    await permissionsOutput(['--mip-decryptor', '/opt/mip-decrypt']),
+    /^Mode:.*mip-decryptor resolved/m,
+  );
 });

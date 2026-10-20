@@ -15,6 +15,7 @@ import { extractCollection } from '../graph/client.js';
 import { fetchContentRange } from '../graph/fetch-binary.js';
 import { resolveShare } from '../graph/shares.js';
 import { escapeODataString } from '../util/odata.js';
+import { createMipDecryptor } from '../util/mip-decrypt.js';
 import {
   decodeParseCursor,
   parseDocument,
@@ -894,11 +895,18 @@ export const filesModule: ToolModule = {
             // Unreachable: the schema refinement rejects sourceless calls.
             throw new Error('Give one source: shareUrl, driveId+itemId, or messageId+attachmentId.');
           }
+          // The real decryptor only exists when a sidecar resolves; otherwise
+          // the key stays absent and protected documents take the refusal
+          // path. Test hooks still win, so the suite stays offline. The flag
+          // value rides as explicitPath so `--mip-decryptor` wins over the
+          // environment instead of parsing without ever acting.
+          const decrypt = createMipDecryptor({ explicitPath: config.mipDecryptor });
           const deps: ParseDeps = {
             graph,
             fileScopes: SHARED_READ_SCOPES,
             mailScopes: ['Mail.Read'],
             fetchBytes: (opts) => fetchContentRange(auth, config, opts),
+            ...(decrypt === undefined ? {} : { decrypt }),
             ...filesParseTestHooks.deps,
           };
           return parseDocument({ source, unitOffset, unitLimit, maxCharsPerUnit }, deps);

@@ -27,6 +27,7 @@ import {
 } from './groups.js';
 import { mapLoginFailure } from '../auth/provider.js';
 import { readIdentity } from '../auth/token-cache.js';
+import { resolveMipDecryptorPath } from '../util/mip-decrypt.js';
 import { normalizeGraphPath } from '../util/paths.js';
 import { guessScopesForPath } from '../util/scopes.js';
 
@@ -625,7 +626,8 @@ export const genericModule: ToolModule = {
         description:
           'Reports how this server is configured: which tool groups are enabled, the delegated ' +
           'Microsoft Graph scopes each one uses, which of them need a tenant administrator to ' +
-          'consent, whether write tools are suppressed, and the signed-in account. Call it when ' +
+          'consent, whether write tools are suppressed, whether a MIP decryptor sidecar is ' +
+          'available, and the signed-in account. Call it when ' +
           'a request fails with 403 or "insufficient privileges" to see whether the needed area ' +
           'is switched on at all. Reads only the signed-in account from Graph.',
         inputSchema: permissionsInput,
@@ -667,6 +669,12 @@ export const genericModule: ToolModule = {
             graphVersion: config.graphVersion,
             allowBeta: config.allowBeta,
             allowGenericWrite: config.allowGenericWrite,
+            // Presence, not the path: the caller asks whether protected
+            // documents will decrypt, matching the Mode line in status.
+            mipDecryptor:
+              resolveMipDecryptorPath({ explicitPath: config.mipDecryptor }) === undefined
+                ? 'absent'
+                : 'resolved',
             adminConsentRequired: config.groups.filter(
               (name) => GROUPS[name]?.requiresAdminConsent === true,
             ),

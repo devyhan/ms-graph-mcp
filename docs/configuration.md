@@ -168,6 +168,7 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 | `--max-output-chars <n>` | `MS365_MCP_MAX_OUTPUT_CHARS` | `60000` | Truncate serialised tool output beyond this many characters. |
 | `--output <name>` | `MS365_MCP_OUTPUT` | `json` | Tool result format: `json` (indented) or `toon` (compact tables: headers once plus bare rows). |
 | `--cache-dir <path>` | `MS365_MCP_CACHE_DIR` | OS config directory | Directory holding the token cache. |
+| `--mip-decryptor <path>` | `MS365_MCP_MIP_DECRYPTOR` | bundled copy or PATH lookup | Path to the MIP decryptor sidecar that unprotects Purview (AIP/RMS) documents for `files_parse_document`. |
 | `--verbose`, `-v` | `MS365_MCP_VERBOSE` | off | Log Graph requests to stderr. |
 | `--help`, `-h` | | | Print help and exit. |
 | `--version` | | | Print the package version and exit. |
@@ -175,6 +176,8 @@ Every option has an `MS365_MCP_*` environment variable fallback; the flag wins. 
 `MS365_MCP_AUTH_FLOW=interactive`, the undocumented value that used to select the browser flow, is still accepted as an alias for `browser`.
 
 `--discovery` is worth knowing about: with every group enabled the server exposes 111 tools, and 111 tool schemas is a large, permanent cost on the first turn of every conversation. In discovery mode the client sees six tools instead — `discover_tools` searches the catalogue and returns names and descriptions without schemas, `call_tool` invokes one by name, `graph_list_permissions` reports the configuration, `session_status` probes the session, and `auth_begin_login` with `auth_login_status` sign you in. The last three are exposed here deliberately: a caller with no session cannot reach a tool through `call_tool` that it has not discovered yet, and signing in is the first thing such a caller needs. The model pays for a tool's schema only when it actually calls it.
+
+`--mip-decryptor` points at a `mip-decrypt` sidecar binary (built separately from `native/mip-decrypt`, which needs the closed-source MIP SDK this package cannot ship) so `files_parse_document` can read Purview-protected (AIP/RMS) documents. The lookup order is the flag, then `MS365_MCP_MIP_DECRYPTOR`, then a copy beside the installed package, then `PATH`. With no sidecar found, protected documents are refused with `PROTECTED_DOCUMENT` rather than returning their cover page as content; `status`, `permissions` and `graph_list_permissions` report the outcome as `mip-decryptor resolved` or `absent`. Decrypting needs no extra Graph scope — see [Rights Management consent](auth.md#rights-management-consent).
 
 ## Proxy
 

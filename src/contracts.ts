@@ -454,4 +454,11 @@ export interface ServerConfig {
   authPort: number;
   /** Expose the generic `graph_request` write escape hatch. */
   allowGenericWrite: boolean;
+  /**
+   * Explicit path to the MIP decryptor sidecar (`--mip-decryptor`). Absent
+   * when neither the flag nor its environment fallback was given; the
+   * launcher then still tries its bundled and PATH guesses, so absence here
+   * means "unconfigured", not "unavailable".
+   */
+  mipDecryptor?: string;
 }

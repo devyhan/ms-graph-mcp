@@ -19,8 +19,12 @@ import { resolveShare } from '../graph/shares.js';
 import {
   MAX_DOCUMENT_BYTES,
   detectKind,
+  isAipCoverText,
+  isAipWrapperPdf,
+  protectionRefusal,
   type DocumentKind,
   type ExtractionResult,
+  type ProtectionKind,
 } from './extract.js';
 import { extractDocx } from './extract-docx.js';
 import { extractXlsx } from './extract-xlsx.js';
@@ -59,6 +63,12 @@ export interface ParseDeps {
   mailScopes: string[];
   fetchBytes: FetchBytes;
   extract?: (kind: DocumentKind, bytes: Uint8Array, fileName: string) => Promise<ExtractionResult>;
+  /**
+   * Optional MIP sidecar decryptor: protection wrapper bytes in, plaintext
+   * bytes out. Absent in tests and on servers without a configured decryptor;
+   * protected documents are then refused instead of decrypted.
+   */
+  decrypt?: (bytes: Uint8Array, fileName: string) => Promise<Uint8Array>;
 }
 
 export interface ParsedUnit {
@@ -84,6 +94,12 @@ export interface ParseManifest {
   returnedRange: { from: number; to: number } | null;
   reason: 'complete' | 'maxItems';
   cursor?: string | undefined;
+  /** True when the source was a protection wrapper rather than plain content. */
+  protected: boolean;
+  /** How the source was protected. Present only when `protected` is true. */
+  protection?: ProtectionKind | undefined;
+  /** True when a decryptor ran before extraction. */
+  decrypted: boolean;
 }
 
 export interface ParseResult {
@@ -93,6 +109,12 @@ export interface ParseResult {
   unitKind: 'section' | 'sheet' | 'slide' | 'page';
   driveId?: string | undefined;
   itemId?: string | undefined;
+  /** True when the source was a protection wrapper rather than plain content. */
+  protected: boolean;
+  /** How the source was protected. Present only when `protected` is true. */
+  protection?: ProtectionKind | undefined;
+  /** True when a decryptor ran before extraction. */
+  decrypted: boolean;
   units: ParsedUnit[];
   manifest: ParseManifest;
   warnings: string[];
@@ -291,8 +313,42 @@ export async function parseDocument(options: ParseOptions, deps: ParseDeps): Pro
     resolved = await mailBytes(deps, source.messageId, source.attachmentId);
   }
 
-  const kind = detectKind(resolved.fileName, resolved.mimeType, resolved.bytes);
-  const extracted = await extract(kind, resolved.bytes, resolved.fileName);
+  let kind = detectKind(resolved.fileName, resolved.mimeType, resolved.bytes);
+  let bytes = resolved.bytes;
+  let protection: ProtectionKind | undefined;
+  let decrypted = false;
+
+  // A Purview wrapper still detects as a PDF — its cover page would otherwise
+  // come back as the document body. Refuse (or decrypt) before extracting so
+  // the cover is never returned as content.
+  if (kind === 'pdf' && isAipWrapperPdf(bytes)) {
+    protection = 'aip-rms';
+    if (deps.decrypt === undefined) throw protectionRefusal(resolved.fileName, 'aip-rms');
+    bytes = await deps.decrypt(bytes, resolved.fileName);
+    kind = detectKind(resolved.fileName, resolved.mimeType, bytes);
+    if (kind === 'pdf' && isAipWrapperPdf(bytes)) throw protectionRefusal(resolved.fileName, 'aip-rms');
+    decrypted = true;
+  }
+
+  let extracted = await extract(kind, bytes, resolved.fileName);
+
+  // Byte markers miss wrappers the producer shaped differently; the cover
+  // text is the second net. It also runs after a decrypt: plaintext that
+  // still reads as a cover must not come back as the body either.
+  if (isAipCoverText(extracted.units[0]?.text ?? '')) {
+    if (decrypted || deps.decrypt === undefined) throw protectionRefusal(resolved.fileName, 'aip-rms');
+    const plain = await deps.decrypt(bytes, resolved.fileName);
+    const reKind = detectKind(resolved.fileName, resolved.mimeType, plain);
+    if (reKind === 'pdf' && isAipWrapperPdf(plain)) throw protectionRefusal(resolved.fileName, 'aip-rms');
+    const reExtracted = await extract(reKind, plain, resolved.fileName);
+    if (isAipCoverText(reExtracted.units[0]?.text ?? '')) {
+      throw protectionRefusal(resolved.fileName, 'aip-rms');
+    }
+    kind = reKind;
+    extracted = reExtracted;
+    protection = 'aip-rms';
+    decrypted = true;
+  }
 
   const sliced = extracted.units.slice(unitOffset, unitOffset + unitLimit);
   const units: ParsedUnit[] = sliced.map((unit, index) => {
@@ -309,7 +365,11 @@ export async function parseDocument(options: ParseOptions, deps: ParseDeps): Pro
   });
   const done = unitOffset + sliced.length >= extracted.units.length;
   const reason = done ? 'complete' : 'maxItems';
+  const isProtected = protection !== undefined;
   const manifest: ParseManifest = {
+    protected: isProtected,
+    ...(protection === undefined ? {} : { protection }),
+    decrypted,
     units: units.map(({ i, id, chars, truncated }) => ({ i, id, chars, truncated })),
     titles: extracted.units.map((unit, i) => ({
       i,
@@ -338,6 +398,9 @@ export async function parseDocument(options: ParseOptions, deps: ParseDeps): Pro
     unitKind: UNIT_KIND[kind],
     ...(resolved.driveId === undefined ? {} : { driveId: resolved.driveId }),
     ...(resolved.itemId === undefined ? {} : { itemId: resolved.itemId }),
+    protected: isProtected,
+    ...(protection === undefined ? {} : { protection }),
+    decrypted,
     units,
     manifest,
     warnings: extracted.warnings,

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import type { AuthFlow, OutputFormat, ServerConfig } from './contracts.js';
 import { GROUPS, GROUP_NAMES, PRESET_NAMES, PRESETS, resolveGroupsDetailed } from './tools/groups.js';
+import { MIP_DECRYPTOR_ENV } from './util/mip-decrypt.js';
 
 /** What the process should do once configuration is resolved. */
 export type Command =
@@ -454,6 +455,13 @@ const FLAGS: FlagSpec[] = [
     fallback: 'OS config directory',
   },
   {
+    flag: '--mip-decryptor',
+    env: MIP_DECRYPTOR_ENV,
+    value: '<path>',
+    summary: 'MIP decryptor sidecar that unprotects Purview (AIP/RMS) documents.',
+    fallback: 'bundled copy or PATH lookup',
+  },
+  {
     flag: '--verbose',
     alias: '-v',
     env: 'MS365_MCP_VERBOSE',
@@ -758,6 +766,7 @@ interface RawOptions {
   maxOutputChars?: number;
   output?: OutputFormat;
   cacheDir?: string;
+  mipDecryptor?: string;
   verbose?: boolean;
   authFlow?: AuthFlow;
   authPort?: number;
@@ -787,6 +796,8 @@ function fromEnv(env: NodeJS.ProcessEnv): RawOptions {
   if (output !== undefined) raw.output = parseOutput(output, 'MS365_MCP_OUTPUT');
   const cacheDir = envString(env, 'MS365_MCP_CACHE_DIR');
   if (cacheDir !== undefined) raw.cacheDir = cacheDir;
+  const mipDecryptor = envString(env, MIP_DECRYPTOR_ENV);
+  if (mipDecryptor !== undefined) raw.mipDecryptor = mipDecryptor;
   const authFlow = envString(env, 'MS365_MCP_AUTH_FLOW');
   if (authFlow !== undefined) raw.authFlow = parseAuthFlow(authFlow, 'MS365_MCP_AUTH_FLOW');
   const authPort = envString(env, 'MS365_MCP_AUTH_PORT');
@@ -943,6 +954,9 @@ export function parseConfig(argv: string[], env: NodeJS.ProcessEnv): ParsedConfi
       case '--cache-dir':
         raw.cacheDir = takeValue();
         break;
+      case '--mip-decryptor':
+        raw.mipDecryptor = takeValue();
+        break;
       case '--auth-flow':
         raw.authFlow = parseAuthFlow(takeValue(), '--auth-flow');
         break;
@@ -1077,6 +1091,7 @@ function buildConfig(raw: RawOptions, env: NodeJS.ProcessEnv): BuiltConfig {
       authFlow: raw.authFlow ?? DEFAULT_AUTH_FLOW,
       authPort: raw.authPort ?? DEFAULT_AUTH_PORT,
       allowGenericWrite: raw.allowGenericWrite ?? false,
+      ...(raw.mipDecryptor === undefined ? {} : { mipDecryptor: raw.mipDecryptor }),
     },
   };
 }

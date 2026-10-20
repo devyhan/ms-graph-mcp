@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { scopeReadingOnlyAuth } from '../auth/index.js';
+import { MIP_DECRYPTOR_ENV } from '../util/mip-decrypt.js';
 import type {
   GraphClient,
   GraphRequestOptions,
@@ -35,7 +40,10 @@ const config: ServerConfig = {
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31]);
 
-function setup(routes: Record<string, unknown>): {
+function setup(
+  routes: Record<string, unknown>,
+  configOverrides: Partial<ServerConfig> = {},
+): {
   requests: GraphRequestOptions[];
   tool: (name: string) => ToolDefinition;
 } {
@@ -54,7 +62,12 @@ function setup(routes: Record<string, unknown>): {
       throw new Error('unused');
     },
   };
-  const defs = filesModule.build({ graph, config, auth: scopeReadingOnlyAuth(), consentScopes: () => [] });
+  const defs = filesModule.build({
+    graph,
+    config: { ...config, ...configOverrides },
+    auth: scopeReadingOnlyAuth(),
+    consentScopes: () => [],
+  });
   return {
     requests,
     tool: (name: string) => {
@@ -133,6 +146,128 @@ test('files_parse_document parses a drive source end to end (stubbed bytes)', as
     assert.equal(result.manifest.unitCount, 1);
   } finally {
     filesParseTestHooks.deps = undefined;
+  }
+});
+
+test('files_parse_document decrypts a wrapper when a sidecar resolves (fake binary)', async () => {
+  // Bridge: handler -> createMipDecryptor -> fake sidecar -> plaintext parse.
+  // Wrapper bytes are synthetic (magic + /Encrypt + marker), never real ones.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fake-mip-'));
+  const bin = path.join(dir, 'fake-sidecar.mjs');
+  await fs.copyFile(
+    path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      'src',
+      'util',
+      'mip-decrypt-fixtures',
+      'fake-sidecar.mjs',
+    ),
+    bin,
+  );
+  await fs.chmod(bin, 0o755);
+  const prevSidecar = process.env[MIP_DECRYPTOR_ENV];
+  const prevMode = process.env['FAKE_MIP_MODE'];
+  process.env[MIP_DECRYPTOR_ENV] = bin;
+  process.env['FAKE_MIP_MODE'] = 'success';
+  filesParseTestHooks.deps = {
+    fetchBytes: async () => ({
+      bytes: new Uint8Array(
+        Buffer.from('%PDF-1.7\n1 0 obj\n<< /Filter /Aadrm >>\ntrailer << /Encrypt 1 0 R >>', 'latin1'),
+      ),
+      nextOffset: 70,
+    }),
+    extract: async () => ({
+      units: [{ id: 'page-1', title: 'Page 1', text: 'real content after decrypt' }],
+      warnings: [],
+    }),
+  };
+  try {
+    const { tool } = setup({
+      '/drives/DRIVE/items/ITEM': { id: 'ITEM', name: 'r.pdf', size: 70, file: { mimeType: 'application/pdf' } },
+    });
+    const result = (await tool('files_parse_document').handler({
+      driveId: 'DRIVE',
+      itemId: 'ITEM',
+    })) as {
+      units: Array<{ text: string }>;
+      protection: string;
+      decrypted: boolean;
+    };
+    assert.equal(result.units[0]?.text, 'real content after decrypt');
+    assert.equal(result.protection, 'aip-rms');
+    assert.equal(result.decrypted, true);
+  } finally {
+    filesParseTestHooks.deps = undefined;
+    if (prevSidecar === undefined) delete process.env[MIP_DECRYPTOR_ENV];
+    else process.env[MIP_DECRYPTOR_ENV] = prevSidecar;
+    if (prevMode === undefined) delete process.env['FAKE_MIP_MODE'];
+    else process.env['FAKE_MIP_MODE'] = prevMode;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('files_parse_document prefers config.mipDecryptor over the environment', async () => {
+  // Wiring proof: the flag value must reach the launcher as explicitPath. The
+  // env var points at a missing binary, so only the config path can decrypt —
+  // without the wiring this test fails with a no-runtime error instead.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cfg-mip-'));
+  const bin = path.join(dir, 'fake-sidecar.mjs');
+  await fs.copyFile(
+    path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      'src',
+      'util',
+      'mip-decrypt-fixtures',
+      'fake-sidecar.mjs',
+    ),
+    bin,
+  );
+  await fs.chmod(bin, 0o755);
+  const prevSidecar = process.env[MIP_DECRYPTOR_ENV];
+  const prevMode = process.env['FAKE_MIP_MODE'];
+  process.env[MIP_DECRYPTOR_ENV] = path.join(dir, 'does-not-exist');
+  process.env['FAKE_MIP_MODE'] = 'success';
+  filesParseTestHooks.deps = {
+    fetchBytes: async () => ({
+      bytes: new Uint8Array(
+        Buffer.from('%PDF-1.7\n1 0 obj\n<< /Filter /Aadrm >>\ntrailer << /Encrypt 1 0 R >>', 'latin1'),
+      ),
+      nextOffset: 70,
+    }),
+    extract: async () => ({
+      units: [{ id: 'page-1', title: 'Page 1', text: 'decrypted via config path' }],
+      warnings: [],
+    }),
+  };
+  try {
+    const { tool } = setup(
+      {
+        '/drives/DRIVE/items/ITEM': { id: 'ITEM', name: 'r.pdf', size: 70, file: { mimeType: 'application/pdf' } },
+      },
+      { mipDecryptor: bin },
+    );
+    const result = (await tool('files_parse_document').handler({
+      driveId: 'DRIVE',
+      itemId: 'ITEM',
+    })) as {
+      units: Array<{ text: string }>;
+      protection: string;
+      decrypted: boolean;
+    };
+    assert.equal(result.units[0]?.text, 'decrypted via config path');
+    assert.equal(result.protection, 'aip-rms');
+    assert.equal(result.decrypted, true);
+  } finally {
+    filesParseTestHooks.deps = undefined;
+    if (prevSidecar === undefined) delete process.env[MIP_DECRYPTOR_ENV];
+    else process.env[MIP_DECRYPTOR_ENV] = prevSidecar;
+    if (prevMode === undefined) delete process.env['FAKE_MIP_MODE'];
+    else process.env['FAKE_MIP_MODE'] = prevMode;
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });
 
