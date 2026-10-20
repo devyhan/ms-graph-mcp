@@ -40,6 +40,18 @@ const config: ServerConfig = {
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31]);
 
+/**
+ * The fake sidecar is a script with a shebang: directly executable on POSIX,
+ * opaque to CreateProcess on Windows. Real Windows sidecars are .exe files,
+ * which spawn fine — only the fixture is unrunnable there, so bridge tests
+ * skip on win32 instead of asserting what cannot run.
+ */
+function skipWithoutPosixSpawn(t: { skip: (message?: string) => void }): boolean {
+  if (process.platform !== 'win32') return false;
+  t.skip('the script fixture is not directly executable on Windows');
+  return true;
+}
+
 function setup(
   routes: Record<string, unknown>,
   configOverrides: Partial<ServerConfig> = {},
@@ -149,7 +161,8 @@ test('files_parse_document parses a drive source end to end (stubbed bytes)', as
   }
 });
 
-test('files_parse_document decrypts a wrapper when a sidecar resolves (fake binary)', async () => {
+test('files_parse_document decrypts a wrapper when a sidecar resolves (fake binary)', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   // Bridge: handler -> createMipDecryptor -> fake sidecar -> plaintext parse.
   // Wrapper bytes are synthetic (magic + /Encrypt + marker), never real ones.
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fake-mip-'));
@@ -208,7 +221,8 @@ test('files_parse_document decrypts a wrapper when a sidecar resolves (fake bina
   }
 });
 
-test('files_parse_document prefers config.mipDecryptor over the environment', async () => {
+test('files_parse_document prefers config.mipDecryptor over the environment', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   // Wiring proof: the flag value must reach the launcher as explicitPath. The
   // env var points at a missing binary, so only the config path can decrypt —
   // without the wiring this test fails with a no-runtime error instead.

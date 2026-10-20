@@ -38,6 +38,18 @@ async function stageSidecar(name = 'fake-sidecar.mjs'): Promise<{ dir: string; b
   return { dir, bin };
 }
 
+/**
+ * The fixture is a script with a shebang: directly executable on POSIX,
+ * opaque to CreateProcess on Windows. Real Windows sidecars are .exe files,
+ * which spawn fine — only the fixture is unrunnable there, so spawn tests
+ * skip on win32 instead of asserting what cannot run.
+ */
+function skipWithoutPosixSpawn(t: { skip: (message?: string) => void }): boolean {
+  if (process.platform !== 'win32') return false;
+  t.skip('the script fixture is not directly executable on Windows');
+  return true;
+}
+
 async function withMode<T>(mode: string, fn: () => Promise<T>): Promise<T> {
   const prev = process.env['FAKE_MIP_MODE'];
   process.env['FAKE_MIP_MODE'] = mode;
@@ -84,7 +96,8 @@ test('createMipDecryptor returns undefined without a sidecar, a hook with one', 
   assert.equal(typeof hook, 'function');
 });
 
-test('a successful run returns the sidecar output bytes', async () => {
+test('a successful run returns the sidecar output bytes', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     const out = await withMode('success', () =>
@@ -97,7 +110,8 @@ test('a successful run returns the sidecar output bytes', async () => {
   }
 });
 
-test('the input temp file is created 0600', async () => {
+test('the input temp file is created 0600', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('check-mode', () => decryptWithSidecar(bin, new Uint8Array([9]), 'r.pdf'));
@@ -106,7 +120,8 @@ test('the input temp file is created 0600', async () => {
   }
 });
 
-test('exit 1 maps to a failure carrying the sidecar diagnosis', async () => {
+test('exit 1 maps to a failure carrying the sidecar diagnosis', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('fail', () =>
@@ -117,7 +132,8 @@ test('exit 1 maps to a failure carrying the sidecar diagnosis', async () => {
   }
 });
 
-test('exit 2 maps to a usage error', async () => {
+test('exit 2 maps to a usage error', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('usage', () =>
@@ -128,7 +144,8 @@ test('exit 2 maps to a usage error', async () => {
   }
 });
 
-test('a rights refusal maps to no-rights guidance, not a generic failure', async () => {
+test('a rights refusal maps to no-rights guidance, not a generic failure', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('no-rights', () =>
@@ -151,7 +168,26 @@ test('a missing binary maps to a no-runtime error naming the env var', async () 
   );
 });
 
-test('a hung sidecar is killed at the timeout', async () => {
+test('an unexecutable path maps to a no-runtime error, not a crash', async () => {
+  // spawn() throws synchronously for this (observed on Windows) instead of
+  // emitting 'error', which once crashed on a timer declared below the catch.
+  // Runs everywhere: POSIX reports EACCES through the same no-runtime branch.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fake-mip-'));
+  const dud = path.join(dir, 'note.txt');
+  await fs.writeFile(dud, 'not a binary');
+  try {
+    await assertRejectsKind(
+      () => decryptWithSidecar(dud, new Uint8Array([9]), 'r.pdf'),
+      'no-runtime',
+      /could not be started/,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hung sidecar is killed at the timeout', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('hang', () =>
@@ -162,7 +198,8 @@ test('a hung sidecar is killed at the timeout', async () => {
   }
 });
 
-test('empty sidecar output is treated as failed', async () => {
+test('empty sidecar output is treated as failed', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     await withMode('empty', () =>
@@ -173,7 +210,8 @@ test('empty sidecar output is treated as failed', async () => {
   }
 });
 
-test('temp dirs are removed on success and on failure', async () => {
+test('temp dirs are removed on success and on failure', async (t) => {
+  if (skipWithoutPosixSpawn(t)) return;
   const { dir, bin } = await stageSidecar();
   try {
     assert.deepEqual(await leftovers(), []);

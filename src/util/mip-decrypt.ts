@@ -233,10 +233,14 @@ function runSidecar(
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     let settled = false;
+    // Declared up here, not next to setTimeout below: spawn() throws
+    // synchronously for an unexecutable path (observed on Windows), and the
+    // catch calls finish() before any later declaration line runs.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (fn: () => void): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       fn();
     };
     let child: ReturnType<typeof spawn>;
@@ -260,7 +264,7 @@ function runSidecar(
       stderr += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       if (stderr.length > MAX_STDERR_CHARS * 4) stderr = stderr.slice(-MAX_STDERR_CHARS * 4);
     });
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       // SIGKILL, not SIGTERM: a helper waiting on device-code input ignores
       // SIGTERM, and a parse must not hang past its budget either way.
       child.kill('SIGKILL');
