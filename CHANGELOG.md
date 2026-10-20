@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-20
+
+### Fixed
+
+- Harden sidecar temp and token-cache permissions: `mip-decrypt` tightens
+  passthrough and decrypted outputs to owner-only, the example auth helper
+  creates its token cache atomically at `0600`, and the README documents
+  storage cleanup. No parsing or detection behavior change.
+
 ## [0.8.0] - 2026-10-20
 
 ### Added
