@@ -12,7 +12,7 @@ Published on npm as [`@devyhan/ms-graph-mcp`](https://www.npmjs.com/package/@dev
 
 ## Features
 
-- **111 tools across 14 groups** — mail, calendar, files, chat, teams, tasks, contacts, search, directory and device inventory, each enabled independently
+- **112 tools across 14 groups** — mail, calendar, files, chat, teams, tasks, contacts, search, directory and device inventory, each enabled independently
 - **Delegated sign-in only** — acts as you, with your permissions; the token never leaves the server process or enters the conversation
 - **Incremental consent** — a bare login asks for the minimal set, and each tool call authenticates with just the scopes it needs
 - **Model-shaped responses** — Graph results are projected down to sender, timestamp and plain text with paging cursors, not raw markup
@@ -84,12 +84,12 @@ Every setting is also an `MS365_MCP_*` environment variable or a command-line fl
 
 ## Tools
 
-111 tools across 14 groups. `--read-only` removes every write tool, leaving 80. Enable only the groups you need.
+112 tools across 14 groups. `--read-only` removes every write tool, leaving 81. Enable only the groups you need.
 
 | Group | Product | Tools |
 | --- | --- | --- |
 | `me` | Entra ID profile, Outlook mailbox settings | 2 |
-| `mail` | Outlook mail | 14 |
+| `mail` | Outlook mail | 15 |
 | `calendar` | Outlook calendar | 9 |
 | `files` | OneDrive | 13 |
 | `todo` | Microsoft To Do | 8 |

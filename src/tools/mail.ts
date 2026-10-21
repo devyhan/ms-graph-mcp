@@ -109,6 +109,13 @@ interface GraphAttachment {
   '@odata.type'?: string | null;
 }
 
+/** The `inferenceClassificationOverride` properties this module reads. */
+interface GraphInferenceOverride {
+  id?: string | null;
+  classifyAs?: string | null;
+  senderEmailAddress?: EmailAddress | null;
+}
+
 // ---------------------------------------------------------------------------
 // Shared validation
 // ---------------------------------------------------------------------------
@@ -263,6 +270,18 @@ function summarizeFolder(folder: GraphMailFolder, depth: number): Record<string,
       children === undefined || children.length === 0
         ? undefined
         : children.map((child) => summarizeFolder(child, depth - 1)),
+  };
+}
+
+function summarizeOverride(override: GraphInferenceOverride): Record<string, unknown> {
+  return {
+    id: override.id ?? undefined,
+    classifyAs: override.classifyAs ?? undefined,
+    sender: formatAddress(
+      override.senderEmailAddress === null || override.senderEmailAddress === undefined
+        ? undefined
+        : { emailAddress: override.senderEmailAddress },
+    ),
   };
 }
 
@@ -562,6 +581,16 @@ const getAttachmentContentInput = z.object({
     .describe(
       'Maximum characters of text (or base64) to return. Defaults to 20000; longer content is cut with a marker.',
     ),
+});
+
+const listInferenceOverridesInput = z.object({
+  top: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .default(50)
+    .describe('How many overrides to return. Defaults to 50.'),
 });
 
 /** Largest attachment inlined as content; bigger ones go through files_parse_document ($value). */
@@ -1387,6 +1416,34 @@ export const mailModule: ToolModule = {
             note:
               'Binary content. For .docx/.xlsx/.pptx/.pdf, files_parse_document with ' +
               'messageId+attachmentId returns parsed text instead of base64.',
+          };
+        },
+      },
+      {
+        name: 'mail_list_inference_overrides',
+        title: 'List Focused/Other overrides',
+        description:
+          'Lists the Focused Inbox overrides (GET /me/inferenceClassification/overrides): id, ' +
+          'classifyAs (focused or other) and the sender address per override. An override pins one ' +
+          'sender\'s mail to the named tab, overruling the classifier.',
+        inputSchema: listInferenceOverridesInput,
+        scopes: READ_SCOPES,
+        group: GROUP.name,
+        handler: async (args) => {
+          const { top } = listInferenceOverridesInput.parse(args);
+
+          const res = await graph.request({
+            path: '/me/inferenceClassification/overrides',
+            method: 'GET',
+            query: buildQuery({ select: ['id', 'classifyAs', 'senderEmailAddress'], top }),
+            scopes: READ_SCOPES,
+          });
+
+          const overrides = extractCollection<GraphInferenceOverride>(res.data);
+          return {
+            count: overrides.length,
+            overrides: overrides.map(summarizeOverride),
+            nextLink: res.nextLink,
           };
         },
       },

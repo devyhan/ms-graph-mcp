@@ -1,6 +1,6 @@
 # Tools
 
-111 tools across 14 groups. `--read-only` removes every write tool, leaving 80. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
+112 tools across 14 groups. `--read-only` removes every write tool, leaving 81. The reference for each group is below; the descriptions here are the first line of what the model itself is shown.
 
 ## Tool groups
 
@@ -9,7 +9,7 @@ Tools are grouped by product area. Enable only the groups you need — fewer too
 | Group | Product | Delegated scopes | Admin consent | Tools |
 | --- | --- | --- | --- | --- |
 | `me` | Entra ID profile, Outlook mailbox settings | `User.Read`, `MailboxSettings.Read` | No | 2 |
-| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 14 |
+| `mail` | Outlook mail | `Mail.Read`, `Mail.ReadWrite`, `Mail.Send` | No | 15 |
 | `calendar` | Outlook calendar | `Calendars.Read`, `Calendars.Read.Shared`, `Calendars.ReadWrite` | No | 9 |
 | `files` | OneDrive | `Files.Read`, `Files.Read.All`, `Files.ReadWrite`, `Mail.Read` ² | No | 13 |
 | `todo` | Microsoft To Do | `Tasks.Read`, `Tasks.ReadWrite` | No | 8 |
@@ -48,7 +48,7 @@ The `generic` group is always on and cannot be selected or removed. It holds `au
 </details>
 
 <details>
-<summary><b><code>mail</code></b> — Mail: 14 tools, 7 of them writes</summary>
+<summary><b><code>mail</code></b> — Mail: 15 tools, 7 of them writes</summary>
 
 Bodies are the expensive part of a mailbox, so list calls return `bodyPreview` only and `mail_get_message` fetches one message in full, HTML stripped to text by default.
 
@@ -65,6 +65,7 @@ A reply chain is the expensive case, because Outlook quotes itself: message N ca
 | `mail_list_folders` |  | Lists the top-level Outlook mail folders with their ids, unread counts and total counts, 50 per call by default. | `top`, `includeChildren` |
 | `mail_list_attachments` |  | Lists attachment metadata for one message — id, name, contentType, size in bytes, whether it is inline, and its kind (file, item, or reference) — 20 per call by default. | **`id`**, `top` |
 | `mail_get_attachment_content` |  | Returns one attachment's content: text for text-like files under 1 MB, base64 otherwise, or the sourceUrl for a reference attachment. | **`id`**, **`attachmentId`**, `maxChars` |
+| `mail_list_inference_overrides` |  | Lists the Focused Inbox overrides: id, classifyAs (focused or other) and sender per override. | `top` |
 | `mail_send` | **write** | Sends a message immediately from the signed-in mailbox — there is no undo and no confirmation step, so confirm the recipients and text with the user first. | **`to`**, **`subject`**, **`body`**, `cc`, `bcc`, `contentType`, `saveToSentItems` |
 | `mail_create_draft` | write | Creates an unsent draft in the Drafts folder and returns its id and webLink. | `to`, **`subject`**, **`body`**, `cc`, `bcc`, `contentType` |
 | `mail_reply` | **write** | Sends a reply to an existing message immediately — it does not create a draft, and there is no undo, so confirm the text with the user first. | **`id`**, **`comment`**, `replyAll` |

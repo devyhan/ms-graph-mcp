@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New read-only mail tool `mail_list_inference_overrides`: the Focused/Other
+  sender overrides, on the group's `Mail.Read` — no new scope needed.
+
 ## [0.8.1] - 2026-10-20
 
 ### Fixed

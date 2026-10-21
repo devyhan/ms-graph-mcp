@@ -17,6 +17,10 @@ test('a bare /me path guesses User.Read', () => {
   assert.deepEqual(guessScopesForPath('/me'), ['User.Read']);
 });
 
+test('an inferenceClassification path still guesses Mail.Read', () => {
+  assert.deepEqual(guessScopesForPath('/me/inferenceClassification/overrides'), ['Mail.Read']);
+});
+
 test('an unknown path guesses nothing, so the caller falls back to the union', () => {
   assert.equal(guessScopesForPath('/some/future/resource'), undefined);
 });

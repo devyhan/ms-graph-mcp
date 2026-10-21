@@ -704,3 +704,72 @@ test('an oversize attachment refuses with the $value route', async () => {
   });
   await assert.rejects(() => get.handler({ id: 'M', attachmentId: 'ATT' }), /files_parse_document/);
 });
+
+// ---------------------------------------------------------------------------
+// mail_list_inference_overrides
+// ---------------------------------------------------------------------------
+
+const OVERRIDES = [
+  {
+    id: 'OV-1',
+    classifyAs: 'focused',
+    senderEmailAddress: { name: 'Ada Lovelace', address: 'ada@example.com' },
+  },
+  { id: 'OV-2', classifyAs: 'other', senderEmailAddress: { address: 'news@example.com' } },
+];
+
+function settingsTool(name: string): {
+  tool: ToolDefinition;
+  requests: GraphRequestOptions[];
+} {
+  const requests: GraphRequestOptions[] = [];
+  const routes: Record<string, unknown> = {
+    '/me/inferenceClassification/overrides': { value: OVERRIDES },
+  };
+  const graph: GraphClient = {
+    async request<T = unknown>(opts: GraphRequestOptions): Promise<GraphResponse<T>> {
+      requests.push(opts);
+      const data = routes[opts.path];
+      assert.ok(data !== undefined, `stub has no route for ${opts.path}`);
+      return { status: 200, data: data as T };
+    },
+    async batch(): Promise<GraphBatchResponse[]> {
+      throw new Error('unused');
+    },
+    async follow<T = unknown>(): Promise<GraphResponse<T>> {
+      throw new Error('unused');
+    },
+  };
+  const found = mailModule
+    .build({ graph, config, auth: scopeReadingOnlyAuth(), consentScopes: () => [] })
+    .find((entry) => entry.name === name);
+  assert.ok(found !== undefined, `${name} should exist`);
+  return { tool: found, requests };
+}
+
+test('inference overrides come back with the sender as one readable string', async () => {
+  const { tool: listOverrides, requests } = settingsTool('mail_list_inference_overrides');
+  const result = (await listOverrides.handler({})) as {
+    count: number;
+    overrides: Array<Record<string, unknown>>;
+  };
+
+  assert.equal(requests[0]?.path, '/me/inferenceClassification/overrides');
+  assert.equal(result.count, 2);
+  assert.deepEqual(result.overrides, [
+    { id: 'OV-1', classifyAs: 'focused', sender: 'Ada Lovelace <ada@example.com>' },
+    { id: 'OV-2', classifyAs: 'other', sender: 'news@example.com' },
+  ]);
+});
+
+test('inference overrides stay on the group Mail.Read and stay read-only', () => {
+  const { tool: listOverrides } = settingsTool('mail_list_inference_overrides');
+  assert.deepEqual(listOverrides.scopes, ['Mail.Read']);
+  assert.notEqual(listOverrides.write, true);
+});
+
+test('top reaches Graph as $top on the overrides listing', async () => {
+  const { tool, requests } = settingsTool('mail_list_inference_overrides');
+  await tool.handler({ top: 5 });
+  assert.equal(requests[0]?.query?.['$top'], 5);
+});
