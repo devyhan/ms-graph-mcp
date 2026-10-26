@@ -36,7 +36,7 @@ Find both IDs in the [Microsoft Entra admin center](https://entra.microsoft.com)
 
 ## Quick start
 
-You need Node.js 20 or later. Sign in once, in a terminal:
+You need Node.js 22 or later — 22.23.4+, 24.22.1+, or 26.12.1+ (the October 2026 security release; 20.x is end-of-life and unpatched). Sign in once, in a terminal:
 
 ```
 npx @devyhan/ms-graph-mcp login
@@ -160,7 +160,7 @@ It is also not a general Microsoft Graph client library. The tools cover the com
 
 ## Development
 
-Requires Node.js 20 or later.
+Requires Node.js 22 or later — 22.23.4+, 24.22.1+, or 26.12.1+ (20.x is end-of-life and unpatched).
 
 ```
 git clone https://github.com/devyhan/ms-graph-mcp.git

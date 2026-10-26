@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-26
+
+### Removed
+
+- Dropped Node.js 20.x support: 20.x is end-of-life and has no patch for the
+  October 2026 security release (Brotli RCE CVE-2026-111497 and others).
+  The engines floor is now `>=22`; use 22.23.4+, 24.22.1+, or 26.12.1+.
+
 ## [0.9.0] - 2026-10-21
 
 ### Added

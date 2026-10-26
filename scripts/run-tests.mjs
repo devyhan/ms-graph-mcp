@@ -17,9 +17,11 @@
  *     native glob, so the shell expands it, `**` does not recurse in sh, and
  *     only the top level matches — 67 of 180 tests, silently.
  *
- * Enumerating the files here is boring and behaves the same on 20, 22 and 24,
- * and on Windows, where neither shell glob would have worked either. Extra
- * arguments pass through, so `npm test -- --test-name-pattern=fold` works.
+ * Enumerating the files here is boring and behaves the same on every
+ * supported Node (the Node 20 notes above are history: 20.x is end-of-life
+ * and no longer supported), and on Windows, where neither shell glob would
+ * have worked either. Extra arguments pass through, so
+ * `npm test -- --test-name-pattern=fold` works.
  */
 import { spawn } from 'node:child_process';
 import { readdir } from 'node:fs/promises';
